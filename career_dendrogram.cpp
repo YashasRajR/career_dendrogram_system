@@ -427,6 +427,65 @@ public:
 };
 
 // ======================================================================
+// CareerApp (declarations)
+// ======================================================================
+
+// CareerApp.h
+// Controls the screens: the start menu, the dashboard, and every feature.
+
+class CareerApp {
+private:
+    std::string dataFolder;
+    CareerList careers;
+    AuthManager auth;
+
+    // Information about the signed-in user.
+    bool signedIn;
+    User currentUser;
+    FileStore<AssessmentResult>* assessments;
+    FileStore<RoadmapProgress>* roadmaps;
+
+    // Start menu screens
+    bool signIn();
+    void createAccount();
+    void howItWorks();
+
+    // Dashboard screens
+    void dashboard();
+    void takeAssessment();
+    void showRecommendations();
+    void showDendrogram();
+    void exploreCareers();
+    void showCareer(Career& career);
+    void compareCareers();
+    void whatIfSimulator();
+    void roadmapTracker();
+    void roadmapDetail(Career& career);
+    void showHistory();
+    void exportReport();
+    void settings();
+    void changePassword();
+
+    // Helpers
+    void openUserFiles();
+    void closeUserFiles();
+    void loadSettings();
+    void saveSettings();
+    bool hasProfile();
+    AssessmentResult latestProfile();
+    Career* chooseCareer(const std::string& title);
+    void startTracking(Career& career);
+    std::vector<std::string> profileLines(const std::vector<double>& traits);
+    std::string confidenceMessage(double gap);
+    std::vector<std::string> dendrogramLines(const std::vector<double>& traits, bool allCareers);
+
+public:
+    CareerApp(const std::string& folder);
+    ~CareerApp();
+    int run();
+};
+
+// ======================================================================
 // Utils
 // ======================================================================
 
@@ -1887,4 +1946,962 @@ vector<string> Dendrogram::draw(int highlightLeaf, int width) {
     lines.push_back(string(labelWidth + 1, ' ') + color(scale, GREY));
     lines.push_back(string(labelWidth + 1, ' ') + color("joining distance (smaller = more similar)", GREY));
     return lines;
+}
+
+// ======================================================================
+// CareerApp
+// ======================================================================
+
+// CareerApp.cpp
+// All the screens of the program. Every screen is one function.
+// In every list, entering 0 goes back to the previous screen.
+
+// Five small blocks showing the growth outlook, e.g. "####."
+static string growthBlocks(int growth) {
+    string code = growth >= 4 ? GREEN : (growth == 3 ? CYAN : YELLOW);
+    return color(string(growth, '#'), code) + color(string(5 - growth, '.'), GREY);
+}
+
+// ============================================================
+//  Start-up and start menu
+// ============================================================
+
+CareerApp::CareerApp(const string& folder) : auth(folder + "/users.db") {
+    dataFolder = folder;
+    signedIn = false;
+    assessments = NULL;
+    roadmaps = NULL;
+    careers.load(dataFolder + "/careers.csv");
+    loadSettings();
+}
+
+CareerApp::~CareerApp() {
+    closeUserFiles();
+}
+
+int CareerApp::run() {
+    if (careers.getAll().empty()) {
+        showError("No careers found in " + dataFolder + "/careers.csv");
+        return 1;
+    }
+
+    while (true) {
+        clearScreen();
+        printBanner();
+        cout << "  " << color(toText(careers.getAll().size()) + " careers in " +
+                              toText(careers.getDomains().size()) + " fields  |  " +
+                              toText(auth.userCount()) + " registered users", GREY) << "\n";
+
+        vector<MenuOption> menu;
+        menu.push_back(makeOption(1, "Sign in", ""));
+        menu.push_back(makeOption(2, "Create an account", "takes under a minute"));
+        menu.push_back(makeOption(3, "How it works", "the method behind the results"));
+        menu.push_back(makeOption(0, "Exit", ""));
+        int choice = showMenu(menu);
+
+        if (choice == 1) {
+            if (signIn()) dashboard();
+        } else if (choice == 2) {
+            createAccount();
+        } else if (choice == 3) {
+            howItWorks();
+        } else {
+            clearScreen();
+            cout << "  Goodbye.\n";
+            return 0;
+        }
+    }
+}
+
+bool CareerApp::signIn() {
+    printTitle("Sign in", "Home / Sign in");
+    string username = toLowerText(askText("Username"));
+    if (username.empty()) return false;
+
+    if (auth.secondsLocked(username) > 0) {
+        showError("This account is locked. Try again in " + toText(auth.secondsLocked(username)) + " seconds.");
+        waitForEnter();
+        return false;
+    }
+
+    string password = askPassword("Password");
+    string message;
+    User user;
+    if (auth.login(username, password, user, message)) {
+        currentUser = user;
+        signedIn = true;
+        openUserFiles();
+        return true;
+    }
+    showError(message);
+    waitForEnter();
+    return false;
+}
+
+void CareerApp::createAccount() {
+    printTitle("Create an account", "Home / Register");
+    vector<string> rules;
+    rules.push_back("Username : 3-20 characters, lowercase letters, digits or underscore");
+    rules.push_back("Password : at least 8 characters, with two kinds (e.g. letters and digits)");
+    rules.push_back("Leave the username empty to cancel.");
+    printBox("Rules", rules);
+    cout << "\n";
+
+    string username;
+    while (true) {
+        username = toLowerText(askText("Choose a username"));
+        if (username.empty()) return;
+        if (AuthManager::isValidUsername(username)) break;
+        showError("That username does not follow the rules above.");
+    }
+
+    // '|' separates fields in our files, so we do not allow it in names.
+    string fullName = askText("Full name");
+    for (int i = 0; i < (int)fullName.size(); i++) {
+        if (fullName[i] == '|') fullName[i] = '/';
+    }
+
+    string password;
+    while (true) {
+        password = askPassword("Choose a password");
+        int strength = AuthManager::passwordStrength(password);
+        string code = strength >= 3 ? GREEN : (strength == 2 ? CYAN : RED);
+        cout << "    Strength  " << colorBar(strength / 4.0, 20, code) << "  " << AuthManager::strengthName(strength) << "\n";
+
+        if (password.size() < 8 || strength < 2) {
+            showError("Too weak. Use at least 8 characters with two kinds of characters.");
+            continue;
+        }
+        if (askPassword("Confirm password") != password) {
+            showError("The passwords do not match. Please try again.");
+            continue;
+        }
+        break;
+    }
+
+    string error = auth.registerUser(username, fullName, password);
+    if (error.empty()) showSuccess("Account created. You can now sign in as '" + username + "'.");
+    else showError(error);
+    waitForEnter();
+}
+
+void CareerApp::howItWorks() {
+    printTitle("How it works", "Home / Method");
+    string titles[5] = {"1. Same 12 numbers for you and every career",
+                        "2. A checked profile",
+                        "3. Explained matches",
+                        "4. The career dendrogram",
+                        "5. Plan and track"};
+    string texts[5] = {
+        "You and every career are described by 12 scores from 0 to 1: six interests (the Holland "
+        "RIASEC model) and six abilities.",
+        "Self-ratings can be too high or too low. Four short test questions check your maths and "
+        "programming ability. The test result is mixed with your self-rating, and the difference is shown.",
+        "Fit = 0.65 x shape + 0.35 x level. Shape: does your pattern of strengths match the career's "
+        "(correlation)? Level: how close are the actual scores? Each match lists what helps and what to improve.",
+        "Careers and your profile are grouped step by step, always joining the two closest groups "
+        "(hierarchical clustering). The tree shows which careers are similar and where you fit.",
+        "The what-if simulator shows how improving one skill changes your ranking. The roadmap tracker "
+        "saves your progress on the steps for a chosen career."};
+
+    for (int i = 0; i < 5; i++) {
+        cout << "  " << color(titles[i], BOLD) << "\n";
+        vector<string> lines = wrapText(texts[i], SCREEN_WIDTH - 6);
+        for (int j = 0; j < (int)lines.size(); j++) cout << "    " << lines[j] << "\n";
+        cout << "\n";
+    }
+    cout << "  " << color("Salary and growth figures are rough guides for India, not exact numbers.", GREY) << "\n";
+    waitForEnter();
+}
+
+// ============================================================
+//  Files for the signed-in user, and settings
+// ============================================================
+
+void CareerApp::openUserFiles() {
+    string folder = dataFolder + "/profiles/" + currentUser.username;
+    assessments = new FileStore<AssessmentResult>(folder + "/assessments.db", "assessments - date|12 trait scores|confidence gap");
+    roadmaps = new FileStore<RoadmapProgress>(folder + "/roadmap.db", "roadmaps - career id|milestones done (1) or not (0)");
+    assessments->load();
+    roadmaps->load();
+}
+
+void CareerApp::closeUserFiles() {
+    delete assessments;
+    delete roadmaps;
+    assessments = NULL;
+    roadmaps = NULL;
+    signedIn = false;
+}
+
+void CareerApp::loadSettings() {
+    ifstream input((dataFolder + "/settings.cfg").c_str());
+    string line;
+    while (getline(input, line)) {
+        if (trimText(line) == "color=0") useColor = false;
+        if (trimText(line) == "color=1") useColor = true;
+    }
+}
+
+void CareerApp::saveSettings() {
+    makeFolder(dataFolder);
+    ofstream output((dataFolder + "/settings.cfg").c_str());
+    output << "color=" << (useColor ? 1 : 0) << "\n";
+}
+
+bool CareerApp::hasProfile() {
+    if (assessments != NULL && assessments->count() > 0) return true;
+    showWarning("Please take the career assessment first (option 1 on the dashboard).");
+    waitForEnter();
+    return false;
+}
+
+// Assessments are saved in time order, so the last one is the newest.
+AssessmentResult CareerApp::latestProfile() {
+    return assessments->getAll().back();
+}
+
+// ============================================================
+//  Dashboard
+// ============================================================
+
+void CareerApp::dashboard() {
+    while (signedIn) {
+        printTitle("Dashboard", "Signed in as " + currentUser.username);
+
+        vector<string> info;
+        info.push_back(currentUser.fullName + "   (member since " + currentUser.createdAt.substr(0, 10) + ")");
+        info.push_back("");
+        if (assessments->count() > 0) {
+            AssessmentResult profile = latestProfile();
+            vector<Match> ranked = rankCareers(profile.traits, careers);
+
+            int done = 0, steps = 0;
+            vector<RoadmapProgress>& list = roadmaps->getAll();
+            for (int i = 0; i < (int)list.size(); i++) {
+                done += list[i].countDone();
+                steps += (int)list[i].done.size();
+            }
+
+            info.push_back(padRight("Latest profile", 18) + profile.date.substr(0, 16) + "  (" + toText(assessments->count()) + " saved)");
+            info.push_back(padRight("Holland code", 18) + hollandCode(profile.traits));
+            info.push_back(padRight("Top match", 18) + ranked[0].career->name + "  " + makeBar(ranked[0].fit, 12) + " " + percent(ranked[0].fit));
+            info.push_back(padRight("Roadmaps", 18) + toText(roadmaps->count()) + " tracked, " +
+                           toText(done) + "/" + toText(steps) + " steps done");
+        } else {
+            info.push_back("No profile yet. Start with the career assessment (about 5 minutes).");
+            info.push_back("It unlocks recommendations, the dendrogram and the simulator.");
+        }
+        printBox("Overview", info);
+
+        vector<MenuOption> menu;
+        menu.push_back(makeOption(1, "Take career assessment", "28 questions, about 5 minutes"));
+        menu.push_back(makeOption(2, "Recommendations", "ranked and explained matches"));
+        menu.push_back(makeOption(3, "Career dendrogram", "see where you fit among careers"));
+        menu.push_back(makeOption(4, "Explore careers", "browse or search all careers"));
+        menu.push_back(makeOption(5, "Compare two careers", "side by side"));
+        menu.push_back(makeOption(6, "What-if simulator", "see how skill changes affect fit"));
+        menu.push_back(makeOption(7, "Roadmap tracker", "steps for chosen careers"));
+        menu.push_back(makeOption(8, "Assessment history", "how your profile has changed"));
+        menu.push_back(makeOption(9, "Export report", "save a text summary"));
+        menu.push_back(makeOption(10, "Settings", "colours on or off"));
+        menu.push_back(makeOption(11, "Change password", ""));
+        menu.push_back(makeOption(0, "Sign out", ""));
+        int choice = showMenu(menu);
+
+        switch (choice) {
+            case 1: takeAssessment(); break;
+            case 2: showRecommendations(); break;
+            case 3: showDendrogram(); break;
+            case 4: exploreCareers(); break;
+            case 5: compareCareers(); break;
+            case 6: whatIfSimulator(); break;
+            case 7: roadmapTracker(); break;
+            case 8: showHistory(); break;
+            case 9: exportReport(); break;
+            case 10: settings(); break;
+            case 11: changePassword(); break;
+            case 0: closeUserFiles(); break;
+        }
+    }
+}
+
+// ============================================================
+//  Assessment
+// ============================================================
+
+// Returns 12 lines like "Realistic     ##########.....  58%".
+vector<string> CareerApp::profileLines(const vector<double>& traits) {
+    vector<string> lines;
+    lines.push_back(color("Interests (RIASEC)", BOLD));
+    for (int t = 0; t < TRAIT_COUNT; t++) {
+        if (t == INTEREST_COUNT) {
+            lines.push_back("");
+            lines.push_back(color("Abilities", BOLD));
+        }
+        string code = traits[t] >= 0.7 ? GREEN : (traits[t] >= 0.4 ? CYAN : YELLOW);
+        lines.push_back("  " + padRight(TRAIT_NAMES[t], 16) + colorBar(traits[t], 36, code) + " " + padLeft(percent(traits[t]), 4));
+    }
+    return lines;
+}
+
+string CareerApp::confidenceMessage(double gap) {
+    int points = (int)(fabs(gap) * 100 + 0.5);
+    if (gap > 0.15) return "You rated yourself about " + toText(points) + " points higher than your test result.";
+    if (gap < -0.15) return "You did about " + toText(points) + " points better on the test than you rated yourself.";
+    return "Your self-rating matches your test result well.";
+}
+
+void CareerApp::takeAssessment() {
+    printTitle("Career Assessment", "Dashboard / Assessment");
+    vector<string> intro;
+    intro.push_back("Part 1  Interests    18 statements - how much would you enjoy each?");
+    intro.push_back("Part 2  Abilities     6 self-ratings of your current skills");
+    intro.push_back("Part 3  Quick check   4 short test questions");
+    intro.push_back("");
+    intro.push_back("Answer for who you are now. Press 'p' to go back, 'q' to quit.");
+    printBox("Before you start", intro);
+    if (!askYesNo("Start the assessment now?")) return;
+
+    AssessmentResult result;
+    int quizScore = 0, quizTotal = 0;
+    if (!runAssessment(result.traits, result.confidenceGap, quizScore, quizTotal)) {
+        showInfo("Assessment cancelled. Nothing was saved.");
+        waitForEnter();
+        return;
+    }
+    result.date = currentTime();
+    assessments->addOrUpdate(result);
+    bool saved = assessments->save();
+
+    printTitle("Your Profile", "Dashboard / Assessment / Result");
+    cout << "  Holland code  " << color(hollandCode(result.traits), PINK) << color("   (your three strongest interests)", GREY) << "\n";
+    cout << "  Test score    " << quizScore << " / " << quizTotal << "\n\n";
+    vector<string> lines = profileLines(result.traits);
+    for (int i = 0; i < (int)lines.size(); i++) cout << "  " << lines[i] << "\n";
+    cout << "\n";
+    if (fabs(result.confidenceGap) > 0.15) showWarning(confidenceMessage(result.confidenceGap));
+    else showSuccess(confidenceMessage(result.confidenceGap));
+
+    vector<Match> ranked = rankCareers(result.traits, careers);
+    printHeading("Your top three matches");
+    for (int i = 0; i < 3 && i < (int)ranked.size(); i++) {
+        cout << "    " << (i + 1) << ". " << padRight(ranked[i].career->name, 34)
+             << colorBar(ranked[i].fit, 16, GREEN) << " " << percent(ranked[i].fit) << "\n";
+    }
+    cout << "\n";
+    if (saved) showSuccess("Profile saved. See Recommendations or the Dendrogram next.");
+    else showError("Could not save the profile.");
+    waitForEnter();
+}
+
+// ============================================================
+//  Recommendations and career details
+// ============================================================
+
+void CareerApp::showRecommendations() {
+    if (!hasProfile()) return;
+    AssessmentResult profile = latestProfile();
+    vector<Match> ranked = rankCareers(profile.traits, careers);
+    int shown = 12;
+    if ((int)ranked.size() < shown) shown = (int)ranked.size();
+
+    while (true) {
+        printTitle("Recommendations", "Dashboard / Recommendations");
+        cout << "  " << color("Profile of " + profile.date.substr(0, 16) + "  |  Holland code " + hollandCode(profile.traits), GREY) << "\n\n";
+        cout << color("   #  " + padRight("Career", 31) + padRight("Fit", 19) + padRight("Salary (LPA)", 14) + "Growth", BOLD) << "\n";
+        cout << "  " << color(string(SCREEN_WIDTH - 4, '-'), GREY) << "\n";
+
+        for (int i = 0; i < shown; i++) {
+            Career* c = ranked[i].career;
+            string salary = c->salaryMin == 0 ? "variable" : toText(c->salaryMin) + "-" + toText(c->salaryMax);
+            cout << padLeft(toText(i + 1), 4) << "  " << padRight(cutText(c->name, 29), 31)
+                 << colorBar(ranked[i].fit, 12, i < 3 ? GREEN : CYAN) << " " << padLeft(percent(ranked[i].fit), 4) << "  "
+                 << padRight(salary, 14) << growthBlocks(c->growth) << "\n";
+        }
+        cout << "\n  " << color("Enter a number to see why it fits and what to improve. 0 = back.", GREY) << "\n";
+        int pick = askNumber("Career", 0, shown);
+        if (pick == 0) return;
+        showCareer(*ranked[pick - 1].career);
+    }
+}
+
+void CareerApp::showCareer(Career& career) {
+    printTitle(career.name, "Career details");
+    vector<string> facts = wrapText(career.summary, SCREEN_WIDTH - 6);
+    facts.push_back("");
+    facts.push_back(padRight("Field", 14) + career.domain);
+    facts.push_back(padRight("Salary", 14) + career.salaryText() + "  (rough guide)");
+    facts.push_back(padRight("Growth", 14) + career.growthText());
+    facts.push_back(padRight("Entry routes", 14) + career.exams);
+    printBox("Overview", facts);
+
+    if (assessments->count() > 0) {
+        AssessmentResult profile = latestProfile();
+        Match m = scoreCareer(profile.traits, career);
+
+        // Find this career's rank.
+        vector<Match> ranked = rankCareers(profile.traits, careers);
+        int rank = 1;
+        while (rank < (int)ranked.size() && ranked[rank - 1].career->id != career.id) rank++;
+
+        printHeading("How you fit");
+        cout << "    Overall fit    " << colorBar(m.fit, 24, GREEN) << " " << percent(m.fit)
+             << color("   rank " + toText(rank) + " of " + toText(ranked.size()), GREY) << "\n";
+        cout << "    Shape          " << colorBar(m.shape, 24, CYAN) << " " << percent(m.shape)
+             << color("   same pattern of strengths?", GREY) << "\n";
+        cout << "    Level          " << colorBar(m.level, 24, CYAN) << " " << percent(m.level)
+             << color("   scores at the same level?", GREY) << "\n";
+
+        if (!m.strengths.empty()) {
+            string list;
+            for (int i = 0; i < (int)m.strengths.size(); i++) {
+                if (i > 0) list += ", ";
+                list += TRAIT_NAMES[m.strengths[i]];
+            }
+            cout << "\n    " << color("Your strengths it uses: ", GREEN) << list << "\n";
+        }
+
+        printHeading("You compared with what the career needs");
+        for (int t = 0; t < TRAIT_COUNT; t++) {
+            double you = profile.traits[t];
+            double need = career.traits[t];
+            double difference = you - need;
+            string code = difference >= -0.05 ? GREEN : (difference >= -GAP_LIMIT ? CYAN : YELLOW);
+            cout << "    " << padRight(TRAIT_NAMES[t], 15) << " you " << colorBar(you, 14, code)
+                 << "  need " << colorBar(need, 14, GREY) << "  " << color(padLeft(signedPoints(difference), 4), code) << "\n";
+        }
+
+        // Which single ability, if raised by 20 points, improves the fit the most?
+        int bestTrait = -1;
+        double bestGain = 0;
+        for (int t = INTEREST_COUNT; t < TRAIT_COUNT; t++) {
+            vector<double> improved = profile.traits;
+            improved[t] = limitValue(improved[t] + 0.2, 0.0, 1.0);
+            double gain = scoreCareer(improved, career).fit - m.fit;
+            if (gain > bestGain) {
+                bestGain = gain;
+                bestTrait = t;
+            }
+        }
+        cout << "\n";
+        if (bestTrait != -1 && bestGain > 0.001) {
+            showInfo("Best skill to improve: " + TRAIT_NAMES[bestTrait] + " (+20 points gives +" +
+                     formatNumber(bestGain * 100, 1) + " fit)");
+        }
+    } else {
+        showInfo("Take the assessment to see how well you fit this career.");
+    }
+
+    printHeading("Roadmap");
+    for (int i = 0; i < (int)career.milestones.size(); i++) {
+        cout << "    " << color(toText(i + 1) + ".", CYAN) << " " << career.milestones[i] << "\n";
+    }
+    cout << "\n";
+
+    if (roadmaps->find(career.id) != NULL) {
+        showInfo("You are already tracking this roadmap (see Roadmap tracker).");
+        waitForEnter();
+    } else if (askYesNo("Add this roadmap to your tracker?")) {
+        startTracking(career);
+        showSuccess("Added to your roadmap tracker.");
+        waitForEnter();
+    }
+}
+
+void CareerApp::startTracking(Career& career) {
+    RoadmapProgress progress;
+    progress.careerId = career.id;
+    progress.done = string(career.milestones.size(), '0');
+    roadmaps->addOrUpdate(progress);
+    roadmaps->save();
+}
+
+// ============================================================
+//  Dendrogram
+// ============================================================
+
+vector<string> CareerApp::dendrogramLines(const vector<double>& traits, bool allCareers) {
+    vector<Match> ranked = rankCareers(traits, careers);
+    if (!allCareers && ranked.size() > 15) ranked.resize(15);
+
+    // Leaf 0 is the student; leaf k (k >= 1) is the career ranked k.
+    vector<string> labels;
+    vector<vector<double> > points;
+    labels.push_back("YOUR PROFILE");
+    points.push_back(traits);
+    for (int i = 0; i < (int)ranked.size(); i++) {
+        labels.push_back(cutText(ranked[i].career->name, 26));
+        points.push_back(ranked[i].career->traits);
+    }
+
+    Dendrogram tree;
+    tree.build(labels, points);
+    int labelWidth = 0;
+    for (int i = 0; i < (int)labels.size(); i++) labelWidth = max(labelWidth, (int)labels[i].size());
+
+    vector<string> lines = tree.draw(0, SCREEN_WIDTH - labelWidth - 6);
+
+    // The smallest group that contains you and at least three careers.
+    vector<int> family = tree.familyOf(0, 4);
+    lines.push_back("");
+    lines.push_back(color("Your nearest career family", BOLD));
+    for (int leaf = 1; leaf <= (int)ranked.size(); leaf++) {       // in rank order
+        bool inFamily = false;
+        for (int j = 0; j < (int)family.size(); j++) {
+            if (family[j] == leaf) inFamily = true;
+        }
+        if (inFamily) {
+            Match& m = ranked[leaf - 1];
+            lines.push_back("  " + padRight(m.career->name, 34) + colorBar(m.fit, 14, GREEN) + " " + percent(m.fit));
+        }
+    }
+
+    // Cut the tree at 55% of its height to get separate career families.
+    vector<vector<int> > groups = tree.cutTree(0.55);
+    lines.push_back("");
+    lines.push_back(color("Career families (tree cut at 55% of its height)", BOLD));
+    for (int g = 0; g < (int)groups.size(); g++) {
+        string members;
+        bool hasYou = false;
+        for (int j = 0; j < (int)groups[g].size(); j++) {
+            int leaf = groups[g][j];
+            if (leaf == 0) {
+                hasYou = true;
+                continue;
+            }
+            if (!members.empty()) members += ", ";
+            members += ranked[leaf - 1].career->name;
+        }
+        if (members.empty()) members = "(no careers - your profile stands apart at this level)";
+
+        vector<string> wrapped = wrapText(members, SCREEN_WIDTH - 16);
+        for (int k = 0; k < (int)wrapped.size(); k++) {
+            string head = (k == 0) ? "Family " + string(1, (char)('A' + g)) : "";
+            string text = (hasYou && k == 0) ? color(wrapped[k], PINK) : wrapped[k];
+            lines.push_back("  " + padRight(head, 10) + text);
+        }
+    }
+    return lines;
+}
+
+void CareerApp::showDendrogram() {
+    if (!hasProfile()) return;
+    printTitle("Career Dendrogram", "Dashboard / Dendrogram");
+    vector<string> help;
+    help.push_back("Each line on the left is a career. Your profile is highlighted.");
+    help.push_back("Branches join where careers are similar: the further left two items");
+    help.push_back("join, the more alike they are. The coloured path traces your profile.");
+    printBox("How to read the tree", help);
+
+    vector<MenuOption> menu;
+    menu.push_back(makeOption(1, "Top 15 matches", "shorter tree"));
+    menu.push_back(makeOption(2, "All careers", "full tree"));
+    menu.push_back(makeOption(0, "Back", ""));
+    int choice = showMenu(menu);
+    if (choice == 0) return;
+
+    printTitle("Career Dendrogram", choice == 1 ? "Top 15 matches" : "All careers");
+    vector<string> lines = dendrogramLines(latestProfile().traits, choice == 2);
+    for (int i = 0; i < (int)lines.size(); i++) cout << "  " << lines[i] << "\n";
+    waitForEnter();
+}
+
+// ============================================================
+//  Explore, compare, simulate
+// ============================================================
+
+// Shows all careers in two columns and returns the chosen one (or NULL).
+Career* CareerApp::chooseCareer(const string& title) {
+    printTitle(title, "Choose a career");
+    vector<Career>& all = careers.getAll();
+    int half = ((int)all.size() + 1) / 2;
+    for (int i = 0; i < half; i++) {
+        cout << " " << color(padLeft("[" + toText(i + 1) + "]", 5), CYAN) << " " << padRight(cutText(all[i].name, 30), 31);
+        int j = i + half;
+        if (j < (int)all.size()) {
+            cout << " " << color(padLeft("[" + toText(j + 1) + "]", 5), CYAN) << " " << cutText(all[j].name, 30);
+        }
+        cout << "\n";
+    }
+    cout << "\n";
+    int number = askNumber("Career number (0 = cancel)", 0, (int)all.size());
+    if (number == 0) return NULL;
+    return &all[number - 1];
+}
+
+void CareerApp::exploreCareers() {
+    while (true) {
+        printTitle("Explore Careers", "Dashboard / Explore");
+        vector<MenuOption> menu;
+        menu.push_back(makeOption(1, "Browse by field", ""));
+        menu.push_back(makeOption(2, "Search by keyword", "name, field, exam or summary"));
+        menu.push_back(makeOption(3, "Show all careers", ""));
+        menu.push_back(makeOption(0, "Back", ""));
+        int choice = showMenu(menu);
+        if (choice == 0) return;
+
+        vector<Career*> results;
+        string heading;
+        if (choice == 1) {
+            vector<string> fields = careers.getDomains();
+            printTitle("Explore Careers", "Explore / Fields");
+            vector<MenuOption> fieldMenu;
+            for (int i = 0; i < (int)fields.size(); i++) {
+                fieldMenu.push_back(makeOption(i + 1, fields[i], ""));
+            }
+            fieldMenu.push_back(makeOption(0, "Back", ""));
+            int f = showMenu(fieldMenu);
+            if (f == 0) continue;
+            heading = fields[f - 1];
+            vector<Career>& all = careers.getAll();
+            for (int i = 0; i < (int)all.size(); i++) {
+                if (all[i].domain == heading) results.push_back(&all[i]);
+            }
+        } else if (choice == 2) {
+            string word = askText("Keyword (e.g. GATE, design, finance)");
+            results = careers.search(word);
+            heading = "Results for '" + word + "'";
+        } else {
+            results = careers.search("");
+            heading = "All careers";
+        }
+
+        if (results.empty()) {
+            showWarning("No careers matched.");
+            waitForEnter();
+            continue;
+        }
+
+        while (true) {
+            printTitle("Explore Careers", heading);
+            for (int i = 0; i < (int)results.size(); i++) {
+                cout << padLeft("[" + toText(i + 1) + "]", 6) << "  " << padRight(cutText(results[i]->name, 32), 34)
+                     << padRight(results[i]->domain, 16);
+                if (assessments->count() > 0) {
+                    cout << color("fit " + percent(scoreCareer(latestProfile().traits, *results[i]).fit), GREY);
+                }
+                cout << "\n";
+            }
+            cout << "\n";
+            int number = askNumber("Open career (0 = back)", 0, (int)results.size());
+            if (number == 0) break;
+            showCareer(*results[number - 1]);
+        }
+    }
+}
+
+void CareerApp::compareCareers() {
+    Career* first = chooseCareer("Compare - first career");
+    if (first == NULL) return;
+    Career* second = chooseCareer("Compare - second career");
+    if (second == NULL) return;
+
+    bool haveProfile = assessments->count() > 0;
+    printTitle("Comparison", "Dashboard / Compare");
+    cout << "  " << padRight("", 16) << color(padRight(cutText(first->name, 28), 30), CYAN)
+         << color(cutText(second->name, 28), PINK) << "\n";
+    cout << "  " << color(string(SCREEN_WIDTH - 4, '-'), GREY) << "\n";
+
+    for (int t = 0; t < TRAIT_COUNT; t++) {
+        if (t == INTEREST_COUNT) cout << "\n";
+        cout << "  " << padRight(TRAIT_NAMES[t], 16) << colorBar(first->traits[t], 20, CYAN) << "          "
+             << colorBar(second->traits[t], 20, PINK);
+        if (haveProfile) cout << color("  you " + percent(latestProfile().traits[t]), GREY);
+        cout << "\n";
+    }
+    cout << "\n";
+    cout << "  " << padRight("Salary", 16) << padRight(first->salaryText(), 30) << second->salaryText() << "\n";
+    cout << "  " << padRight("Growth", 16) << padRight(first->growthText(), 30) << second->growthText() << "\n";
+    cout << "  " << padRight("Field", 16) << padRight(first->domain, 30) << second->domain << "\n";
+    if (haveProfile) {
+        Match a = scoreCareer(latestProfile().traits, *first);
+        Match b = scoreCareer(latestProfile().traits, *second);
+        cout << "  " << padRight("Your fit", 16) << padRight(percent(a.fit), 30) << percent(b.fit) << "\n";
+        cout << "  " << padRight("Skills to improve", 16) << padRight(toText(a.gapTraits.size()), 30)
+             << b.gapTraits.size() << "\n";
+    }
+    double similar = (correlation(first->traits, second->traits) + 1) / 2;
+    cout << "\n  " << color("How similar the two careers are: ", GREY) << percent(similar) << "\n";
+    waitForEnter();
+}
+
+void CareerApp::whatIfSimulator() {
+    if (!hasProfile()) return;
+    vector<double> original = latestProfile().traits;
+    vector<double> changed = original;
+
+    while (true) {
+        vector<Match> before = rankCareers(original, careers);
+        vector<Match> after = rankCareers(changed, careers);
+
+        printTitle("What-if Simulator", "Dashboard / Simulator");
+        cout << "  " << color("Change a score to see how your ranking moves. Your saved profile is safe.", GREY) << "\n\n";
+
+        for (int t = 0; t < TRAIT_COUNT; t++) {
+            double change = changed[t] - original[t];
+            bool isChanged = fabs(change) > 0.0001;
+            cout << "  " << padLeft("[" + toText(t + 1) + "]", 5) << " " << padRight(TRAIT_NAMES[t], 15)
+                 << colorBar(changed[t], 20, isChanged ? PINK : CYAN) << " " << padLeft(percent(changed[t]), 4);
+            if (isChanged) cout << "  " << color(signedPoints(change), change > 0 ? GREEN : RED);
+            cout << "\n";
+        }
+
+        cout << "\n  " << color(padRight("Rank", 6) + padRight("Career", 30) + padRight("Fit", 20) + "Change", BOLD) << "\n";
+        for (int i = 0; i < 8 && i < (int)after.size(); i++) {
+            // Find the old rank of this career.
+            int oldRank = 0;
+            for (int j = 0; j < (int)before.size(); j++) {
+                if (before[j].career == after[i].career) oldRank = j + 1;
+            }
+            int moved = oldRank - (i + 1);
+            string movement;
+            if (moved > 0) movement = color("up " + toText(moved), GREEN);
+            else if (moved < 0) movement = color("down " + toText(-moved), RED);
+            else movement = color("same", GREY);
+
+            cout << "  " << padRight(toText(i + 1), 6) << padRight(cutText(after[i].career->name, 28), 30)
+                 << colorBar(after[i].fit, 12, CYAN) << " " << padLeft(percent(after[i].fit), 4) << "   " << movement << "\n";
+        }
+
+        cout << "\n  " << color("Pick a score 1-12 to change, 13 to reset, 0 to leave.", GREY) << "\n";
+        int t = askNumber("Score", 0, 13);
+        if (t == 0) return;
+        if (t == 13) {
+            changed = original;
+            continue;
+        }
+        int level = askNumber("New value for " + TRAIT_NAMES[t - 1] + " (0-100)", 0, 100);
+        changed[t - 1] = level / 100.0;
+    }
+}
+
+// ============================================================
+//  Roadmaps
+// ============================================================
+
+void CareerApp::roadmapTracker() {
+    while (true) {
+        printTitle("Roadmap Tracker", "Dashboard / Roadmaps");
+        vector<RoadmapProgress>& list = roadmaps->getAll();
+        vector<Career*> tracked;
+        vector<MenuOption> menu;
+
+        for (int i = 0; i < (int)list.size(); i++) {
+            Career* c = careers.findById(list[i].careerId);
+            if (c == NULL) continue;
+            tracked.push_back(c);
+            double fraction = list[i].done.empty() ? 0 : (double)list[i].countDone() / list[i].done.size();
+            string hint = makeBar(fraction, 16) + " " + toText(list[i].countDone()) + "/" + toText(list[i].done.size());
+            menu.push_back(makeOption((int)tracked.size(), cutText(c->name, 28), hint));
+        }
+        if (tracked.empty()) showInfo("You are not tracking any roadmaps yet.");
+
+        int addOption = (int)tracked.size() + 1;
+        menu.push_back(makeOption(addOption, "Track another career", ""));
+        menu.push_back(makeOption(0, "Back", ""));
+        int choice = showMenu(menu);
+
+        if (choice == 0) return;
+        if (choice == addOption) {
+            Career* c = chooseCareer("Track a career");
+            if (c != NULL) {
+                if (roadmaps->find(c->id) == NULL) startTracking(*c);
+                roadmapDetail(*c);
+            }
+        } else {
+            roadmapDetail(*tracked[choice - 1]);
+        }
+    }
+}
+
+void CareerApp::roadmapDetail(Career& career) {
+    while (true) {
+        RoadmapProgress* progress = roadmaps->find(career.id);
+        if (progress == NULL) return;
+        progress->done.resize(career.milestones.size(), '0');
+
+        printTitle(career.name, "Roadmaps / Steps");
+        int steps = (int)career.milestones.size();
+        double fraction = steps == 0 ? 0 : (double)progress->countDone() / steps;
+        cout << "  Progress  " << colorBar(fraction, 40, fraction >= 1 ? GREEN : CYAN) << "  " << percent(fraction) << "\n\n";
+
+        int nextStep = -1;
+        for (int i = 0; i < steps; i++) {
+            bool isDone = progress->done[i] == '1';
+            if (!isDone && nextStep == -1) nextStep = i;
+            cout << "  " << padLeft("[" + toText(i + 1) + "]", 5) << "  "
+                 << (isDone ? color("done   ", GREEN) : color("to do  ", GREY))
+                 << (isDone ? color(career.milestones[i], GREY) : career.milestones[i]) << "\n";
+        }
+        cout << "\n";
+        if (nextStep != -1) cout << "  " << color("Next step: ", CYAN) << career.milestones[nextStep] << "\n";
+        else showSuccess("Roadmap complete. Well done.");
+
+        int stopOption = steps + 1;
+        cout << "\n  " << color("Enter a step number to mark done/undone, " + toText(stopOption) +
+                                " to stop tracking, 0 = back.", GREY) << "\n";
+        int choice = askNumber("Step", 0, stopOption);
+        if (choice == 0) return;
+
+        if (choice == stopOption) {
+            if (askYesNo("Stop tracking " + career.name + "? Your progress will be removed.")) {
+                roadmaps->remove(career.id);
+                roadmaps->save();
+                return;
+            }
+            continue;
+        }
+        char& step = progress->done[choice - 1];
+        step = (step == '1') ? '0' : '1';
+        roadmaps->save();
+    }
+}
+
+// ============================================================
+//  History, report, settings, password
+// ============================================================
+
+void CareerApp::showHistory() {
+    printTitle("Assessment History", "Dashboard / History");
+    vector<AssessmentResult>& list = assessments->getAll();
+    if (list.empty()) {
+        showInfo("No assessments saved yet.");
+        waitForEnter();
+        return;
+    }
+
+    cout << color("  " + padRight("Date", 20) + padRight("Code", 7) + padRight("Top match", 32) + "Self-rating", BOLD) << "\n";
+    for (int i = 0; i < (int)list.size(); i++) {
+        Match top = rankCareers(list[i].traits, careers)[0];
+        string check = list[i].confidenceGap > 0.15 ? "too high" : (list[i].confidenceGap < -0.15 ? "too low" : "accurate");
+        cout << "  " << padRight(list[i].date.substr(0, 16), 20) << padRight(hollandCode(list[i].traits), 7)
+             << padRight(cutText(top.career->name, 26) + " " + percent(top.fit), 32) << color(check, GREY) << "\n";
+    }
+
+    if (list.size() >= 2) {
+        vector<double>& first = list[0].traits;
+        vector<double>& last = list[list.size() - 1].traits;
+        printHeading("Change since your first assessment");
+        for (int t = 0; t < TRAIT_COUNT; t++) {
+            double change = last[t] - first[t];
+            string code = change > 0.02 ? GREEN : (change < -0.02 ? RED : GREY);
+            cout << "    " << padRight(TRAIT_NAMES[t], 16) << padLeft(percent(first[t]), 5) << "  ->  "
+                 << padLeft(percent(last[t]), 5) << "   " << color(padLeft(signedPoints(change), 4), code) << "\n";
+        }
+    }
+    waitForEnter();
+}
+
+void CareerApp::exportReport() {
+    printTitle("Export Report", "Dashboard / Export");
+
+    // File name like reports/yashas_20261001_140509.txt
+    string stamp;
+    string now = currentTime();
+    for (int i = 0; i < (int)now.size(); i++) {
+        if (now[i] == ' ') stamp += '_';
+        else if (now[i] != '-' && now[i] != ':') stamp += now[i];
+    }
+    makeFolder("reports");
+    string fileName = "reports/" + currentUser.username + "_" + stamp + ".txt";
+    ofstream out(fileName.c_str());
+    if (!out) {
+        showError("Could not create " + fileName);
+        waitForEnter();
+        return;
+    }
+
+    // Turn colours off while writing, so the file has plain text only.
+    bool oldColor = useColor;
+    useColor = false;
+
+    string line(SCREEN_WIDTH, '=');
+    out << line << "\n  CAREER DENDROGRAM REPORT\n" << line << "\n\n";
+    out << "  Name          " << currentUser.fullName << " (" << currentUser.username << ")\n";
+    out << "  Created       " << now << "\n";
+
+    if (assessments->count() > 0) {
+        AssessmentResult profile = latestProfile();
+        out << "  Profile date  " << profile.date << "\n";
+        out << "  Holland code  " << hollandCode(profile.traits) << "\n\n";
+
+        vector<string> lines = profileLines(profile.traits);
+        for (int i = 0; i < (int)lines.size(); i++) out << "  " << lines[i] << "\n";
+        out << "\n  " << confidenceMessage(profile.confidenceGap) << "\n";
+
+        out << "\n  Top 10 matches\n  --------------\n";
+        vector<Match> ranked = rankCareers(profile.traits, careers);
+        for (int i = 0; i < 10 && i < (int)ranked.size(); i++) {
+            out << "  " << padLeft(toText(i + 1), 3) << ". " << padRight(ranked[i].career->name, 34)
+                << makeBar(ranked[i].fit, 16) << " " << percent(ranked[i].fit) << "\n";
+            if (!ranked[i].gapTraits.empty()) {
+                out << "       improve: ";
+                for (int k = 0; k < (int)ranked[i].gapTraits.size() && k < 3; k++) {
+                    if (k > 0) out << ", ";
+                    out << TRAIT_NAMES[ranked[i].gapTraits[k]] << " (" << signedPoints(-ranked[i].gapSizes[k]) << ")";
+                }
+                out << "\n";
+            }
+        }
+
+        out << "\n  Career dendrogram (top 15 matches)\n  ----------------------------------\n";
+        vector<string> tree = dendrogramLines(profile.traits, false);
+        for (int i = 0; i < (int)tree.size(); i++) out << "  " << tree[i] << "\n";
+    } else {
+        out << "\n  No assessment taken yet.\n";
+    }
+
+    out << "\n  Roadmap progress\n  ----------------\n";
+    vector<RoadmapProgress>& list = roadmaps->getAll();
+    if (list.empty()) out << "  No roadmaps tracked.\n";
+    for (int i = 0; i < (int)list.size(); i++) {
+        Career* c = careers.findById(list[i].careerId);
+        if (c == NULL) continue;
+        out << "  " << c->name << "  (" << list[i].countDone() << "/" << list[i].done.size() << ")\n";
+        for (int k = 0; k < (int)c->milestones.size() && k < (int)list[i].done.size(); k++) {
+            out << "    [" << (list[i].done[k] == '1' ? 'x' : ' ') << "] " << c->milestones[k] << "\n";
+        }
+    }
+    out << "\n" << line << "\n  Salary and growth figures are rough guides. Made with Career Dendrogram System.\n";
+    out.close();
+
+    useColor = oldColor;
+    showSuccess("Report saved to " + fileName);
+    waitForEnter();
+}
+
+void CareerApp::settings() {
+    while (true) {
+        printTitle("Settings", "Dashboard / Settings");
+        cout << "  Preview: " << colorBar(0.6, 20, CYAN) << "  " << color("Success", GREEN) << "  "
+             << color("Warning", YELLOW) << "  " << color("Error", RED) << "\n";
+
+        vector<MenuOption> menu;
+        menu.push_back(makeOption(1, string("Colours: ") + (useColor ? "ON" : "OFF"), "turn off if you see strange symbols"));
+        menu.push_back(makeOption(0, "Back", ""));
+        int choice = showMenu(menu);
+        if (choice == 0) return;
+        useColor = !useColor;
+        saveSettings();
+    }
+}
+
+void CareerApp::changePassword() {
+    printTitle("Change Password", "Dashboard / Account");
+    string oldPassword = askPassword("Current password");
+    string newPassword = askPassword("New password");
+    int strength = AuthManager::passwordStrength(newPassword);
+    cout << "    Strength  " << colorBar(strength / 4.0, 20, strength >= 3 ? GREEN : CYAN) << "  "
+         << AuthManager::strengthName(strength) << "\n";
+
+    if (askPassword("Confirm new password") != newPassword) {
+        showError("The passwords do not match. Nothing was changed.");
+        waitForEnter();
+        return;
+    }
+    string error = auth.changePassword(currentUser.username, oldPassword, newPassword);
+    if (error.empty()) showSuccess("Password changed.");
+    else showError(error);
+    waitForEnter();
 }
