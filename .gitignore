@@ -1,0 +1,21 @@
+# Build output
+build/
+career_dendrogram
+career_dendrogram.exe
+*.o
+*.obj
+
+# Runtime data (private: contains password hashes and personal profiles)
+data/users.db
+data/profiles/
+data/settings.cfg
+data/*.tmp
+reports/
+
+# Editors
+.vscode/
+.idea/
+
+# Dev-C++ generated files
+Makefile.win
+*.layout
