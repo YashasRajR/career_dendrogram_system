@@ -2905,3 +2905,42 @@ void CareerApp::changePassword() {
     else showError(error);
     waitForEnter();
 }
+
+// ======================================================================
+// main
+// ======================================================================
+
+// main.cpp
+// Career Dendrogram System - program starts here.
+//
+// Usage:  career_dendrogram [--data <folder>] [--no-color] [--help]
+
+int main(int argc, char* argv[]) {
+    string dataFolder = "data";
+    bool noColor = false;
+
+    // Read command-line options.
+    for (int i = 1; i < argc; i++) {
+        string option = argv[i];
+        if (option == "--data" && i + 1 < argc) {
+            dataFolder = argv[i + 1];
+            i++;
+        } else if (option == "--no-color") {
+            noColor = true;
+        } else if (option == "--help") {
+            cout << "Career Dendrogram System\n\n";
+            cout << "  --data <folder>   folder for data files (default: data)\n";
+            cout << "  --no-color        turn off colours\n";
+            cout << "  --help            show this message\n";
+            return 0;
+        } else {
+            cout << "Unknown option: " << option << " (try --help)\n";
+            return 1;
+        }
+    }
+
+    setupConsole();
+    CareerApp app(dataFolder);
+    if (noColor) useColor = false;   // the option wins over the saved setting
+    return app.run();
+}
