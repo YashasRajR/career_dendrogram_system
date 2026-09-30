@@ -367,6 +367,66 @@ public:
 bool runAssessment(std::vector<double>& traits, double& confidenceGap, int& quizScore, int& quizTotal);
 
 // ======================================================================
+// Engine (declarations)
+// ======================================================================
+
+// Engine.h
+// The "brain" of the program:
+//   1. scoreCareer / rankCareers - how well a student fits each career
+//   2. Dendrogram                - groups similar careers into a tree
+
+const double SHAPE_WEIGHT = 0.65;     // weight of "same pattern of strengths"
+const double GAP_LIMIT = 0.15;        // a shortfall bigger than this counts as a gap
+
+// The result of comparing one student with one career.
+struct Match {
+    Career* career;
+    double fit;                 // final score, 0 to 1
+    double shape;               // do the strengths follow the same pattern? (0 to 1)
+    double level;               // are the scores at the same level? (0 to 1)
+    std::vector<int> strengths; // traits that help this match the most
+    std::vector<int> gapTraits; // traits where the student is below what is needed
+    std::vector<double> gapSizes;
+};
+
+Match scoreCareer(const std::vector<double>& student, Career& career);
+std::vector<Match> rankCareers(const std::vector<double>& student, CareerList& careers);
+
+// Builds a tree by repeatedly joining the two closest groups
+// (hierarchical clustering with average linkage, also called UPGMA).
+class Dendrogram {
+private:
+    struct Node {
+        int left;       // child node numbers (-1 for a leaf)
+        int right;
+        int parent;
+        double height;  // distance at which the two children were joined
+        int size;       // number of leaves under this node
+        std::string label;
+    };
+
+    std::vector<Node> nodes;   // leaves first, then the joined groups
+    int leafCount;
+    int root;
+
+    void collectLeaves(int node, std::vector<int>& leaves);
+    void cutNode(int node, double limit, std::vector<std::vector<int> >& groups);
+
+public:
+    Dendrogram();
+    void build(const std::vector<std::string>& labels, const std::vector<std::vector<double> >& points);
+
+    // Returns the tree as lines of text. The path from 'highlightLeaf' to the top is coloured.
+    std::vector<std::string> draw(int highlightLeaf, int width);
+
+    // Leaves in the smallest group that contains 'leaf' and at least 'minSize' leaves.
+    std::vector<int> familyOf(int leaf, int minSize);
+
+    // Cuts the tree at a fraction of its height and returns the groups below the cut.
+    std::vector<std::vector<int> > cutTree(double fraction);
+};
+
+// ======================================================================
 // Utils
 // ======================================================================
 
@@ -1506,4 +1566,325 @@ bool runAssessment(vector<double>& traits, double& confidenceGap, int& quizScore
     }
     confidenceGap = testedTraits > 0 ? gapTotal / testedTraits : 0;
     return true;
+}
+
+// ======================================================================
+// Engine
+// ======================================================================
+
+// Engine.cpp
+// Scoring careers and building the career dendrogram.
+
+// ======================= Scoring =======================
+//
+// fit = 0.65 * shape + 0.35 * level
+//   shape: correlation between the two trait lists (same pattern of strengths?)
+//   level: how close the actual numbers are (1 = identical)
+// Using both avoids two problems: shape alone rates a weak and a strong
+// student the same; level alone favours "average" students.
+
+Match scoreCareer(const vector<double>& student, Career& career) {
+    Match m;
+    m.career = &career;
+    m.shape = (correlation(student, career.traits) + 1) / 2;     // -1..1 becomes 0..1
+
+    double farthest = 0.5 * sqrt((double)TRAIT_COUNT);           // treat this distance as "no match"
+    m.level = 1 - traitDistance(student, career.traits) / farthest;
+    if (m.level < 0) m.level = 0;
+
+    m.fit = SHAPE_WEIGHT * m.shape + (1 - SHAPE_WEIGHT) * m.level;
+
+    // Strengths: traits the career needs (>= 0.5) where the student is also good (>= 0.4).
+    // Pick the three with the largest (student x career) value.
+    vector<bool> picked(TRAIT_COUNT, false);
+    for (int round = 0; round < 3; round++) {
+        int best = -1;
+        for (int t = 0; t < TRAIT_COUNT; t++) {
+            if (picked[t] || career.traits[t] < 0.5 || student[t] < 0.4) continue;
+            if (best == -1 || student[t] * career.traits[t] > student[best] * career.traits[best]) best = t;
+        }
+        if (best == -1) break;
+        picked[best] = true;
+        m.strengths.push_back(best);
+    }
+
+    // Gaps: traits where the career needs clearly more than the student has.
+    for (int t = 0; t < TRAIT_COUNT; t++) {
+        double shortBy = career.traits[t] - student[t];
+        if (shortBy > GAP_LIMIT) {
+            m.gapTraits.push_back(t);
+            m.gapSizes.push_back(shortBy);
+        }
+    }
+    // Sort gaps from biggest to smallest (simple selection sort).
+    for (int i = 0; i < (int)m.gapSizes.size(); i++) {
+        for (int j = i + 1; j < (int)m.gapSizes.size(); j++) {
+            if (m.gapSizes[j] > m.gapSizes[i]) {
+                swap(m.gapSizes[i], m.gapSizes[j]);
+                swap(m.gapTraits[i], m.gapTraits[j]);
+            }
+        }
+    }
+    return m;
+}
+
+static bool higherFit(const Match& a, const Match& b) {
+    return a.fit > b.fit;
+}
+
+vector<Match> rankCareers(const vector<double>& student, CareerList& careers) {
+    vector<Match> results;
+    vector<Career>& all = careers.getAll();
+    for (int i = 0; i < (int)all.size(); i++) {
+        results.push_back(scoreCareer(student, all[i]));
+    }
+    stable_sort(results.begin(), results.end(), higherFit);
+    return results;
+}
+
+// ======================= Dendrogram =======================
+
+Dendrogram::Dendrogram() {
+    leafCount = 0;
+    root = -1;
+}
+
+// Steps:
+//   1. Every point starts as its own group.
+//   2. Find the two closest groups and join them into a new group.
+//   3. The distance from the new group to any other group is the
+//      average of its two parts' distances (weighted by size).
+//   4. Repeat until only one group is left - that is the root.
+void Dendrogram::build(const vector<string>& labels, const vector<vector<double> >& points) {
+    nodes.clear();
+    leafCount = (int)points.size();
+    root = -1;
+    if (leafCount == 0) return;
+
+    for (int i = 0; i < leafCount; i++) {
+        Node leaf;
+        leaf.left = -1;
+        leaf.right = -1;
+        leaf.parent = -1;
+        leaf.height = 0;
+        leaf.size = 1;
+        leaf.label = labels[i];
+        nodes.push_back(leaf);
+    }
+
+    // Distance table big enough for all leaves and all future groups.
+    int maxNodes = 2 * leafCount - 1;
+    vector<vector<double> > dist(maxNodes, vector<double>(maxNodes, 0.0));
+    for (int i = 0; i < leafCount; i++) {
+        for (int j = 0; j < leafCount; j++) {
+            dist[i][j] = traitDistance(points[i], points[j]);
+        }
+    }
+
+    vector<int> active;   // groups not yet joined into something bigger
+    for (int i = 0; i < leafCount; i++) active.push_back(i);
+
+    while (active.size() > 1) {
+        // Step 2: find the closest pair.
+        int bestA = 0, bestB = 1;
+        double bestDistance = dist[active[0]][active[1]];
+        for (int i = 0; i < (int)active.size(); i++) {
+            for (int j = i + 1; j < (int)active.size(); j++) {
+                if (dist[active[i]][active[j]] < bestDistance) {
+                    bestDistance = dist[active[i]][active[j]];
+                    bestA = i;
+                    bestB = j;
+                }
+            }
+        }
+        int a = active[bestA];
+        int b = active[bestB];
+
+        Node group;
+        group.left = a;
+        group.right = b;
+        group.parent = -1;
+        group.height = max(bestDistance, max(nodes[a].height, nodes[b].height));
+        group.size = nodes[a].size + nodes[b].size;
+        group.label = "";
+        int newId = (int)nodes.size();
+        nodes.push_back(group);
+        nodes[a].parent = newId;
+        nodes[b].parent = newId;
+
+        // Step 3: distance from the new group to every other active group.
+        for (int i = 0; i < (int)active.size(); i++) {
+            int other = active[i];
+            if (other == a || other == b) continue;
+            double d = (dist[a][other] * nodes[a].size + dist[b][other] * nodes[b].size) / group.size;
+            dist[newId][other] = d;
+            dist[other][newId] = d;
+        }
+
+        // Replace a and b with the new group (erase the later index first).
+        active.erase(active.begin() + bestB);
+        active.erase(active.begin() + bestA);
+        active.push_back(newId);
+    }
+    root = active[0];
+}
+
+// Adds the leaf numbers under 'node' to the list, from top to bottom.
+void Dendrogram::collectLeaves(int node, vector<int>& leaves) {
+    if (nodes[node].left == -1) {
+        leaves.push_back(node);
+        return;
+    }
+    collectLeaves(nodes[node].left, leaves);
+    collectLeaves(nodes[node].right, leaves);
+}
+
+vector<int> Dendrogram::familyOf(int leaf, int minSize) {
+    vector<int> leaves;
+    if (root == -1) return leaves;
+    int node = leaf;
+    while (nodes[node].size < minSize && nodes[node].parent != -1) {
+        node = nodes[node].parent;
+    }
+    collectLeaves(node, leaves);
+    return leaves;
+}
+
+void Dendrogram::cutNode(int node, double limit, vector<vector<int> >& groups) {
+    if (nodes[node].left == -1 || nodes[node].height <= limit) {
+        vector<int> leaves;
+        collectLeaves(node, leaves);
+        groups.push_back(leaves);
+        return;
+    }
+    cutNode(nodes[node].left, limit, groups);
+    cutNode(nodes[node].right, limit, groups);
+}
+
+vector<vector<int> > Dendrogram::cutTree(double fraction) {
+    vector<vector<int> > groups;
+    if (root == -1) return groups;
+    cutNode(root, fraction * nodes[root].height, groups);
+    return groups;
+}
+
+// Drawing idea:
+//   - Each leaf gets its own row (with an empty row between leaves).
+//   - A group is drawn in the column that matches its joining height,
+//     halfway between the rows of its two children.
+//   - We draw on a grid of characters using '-', '|' and '+'.
+vector<string> Dendrogram::draw(int highlightLeaf, int width) {
+    vector<string> lines;
+    if (root == -1) return lines;
+
+    int total = (int)nodes.size();
+    vector<int> row(total, 0);
+    vector<int> col(total, 0);
+
+    // Rows for leaves, in tree order.
+    vector<int> order;
+    collectLeaves(root, order);
+    for (int i = 0; i < (int)order.size(); i++) row[order[i]] = 2 * i;
+
+    // Rows and columns for groups. Children always have smaller numbers
+    // than their parent, so one pass from low to high works.
+    double treeHeight = nodes[root].height;
+    if (treeHeight <= 0) treeHeight = 1;
+    for (int n = leafCount; n < total; n++) {
+        int l = nodes[n].left;
+        int r = nodes[n].right;
+        row[n] = (row[l] + row[r]) / 2;
+        col[n] = (int)(nodes[n].height / treeHeight * (width - 4) + 0.5);
+        col[n] = max(col[n], max(col[l], col[r]) + 1);   // always right of its children
+    }
+
+    int rows = 2 * leafCount - 1;
+    int cols = col[root] + 3;
+    vector<string> grid(rows, string(cols, ' '));
+    vector<vector<bool> > highlighted(rows, vector<bool>(cols, false));
+
+    // Mark the nodes on the path from the highlighted leaf up to the root.
+    vector<bool> onPath(total, false);
+    for (int n = highlightLeaf; n != -1; n = nodes[n].parent) onPath[n] = true;
+
+    for (int n = leafCount; n < total; n++) {
+        int x = col[n];
+        int children[2] = {nodes[n].left, nodes[n].right};
+
+        for (int k = 0; k < 2; k++) {
+            int child = children[k];
+            // Horizontal line from the child to this group.
+            for (int c = col[child]; c < x; c++) {
+                if (grid[row[child]][c] == ' ') grid[row[child]][c] = '-';
+                if (onPath[child]) highlighted[row[child]][c] = true;
+            }
+            grid[row[child]][x] = '+';
+            if (onPath[child]) {
+                int from = min(row[child], row[n]);
+                int to = max(row[child], row[n]);
+                for (int y = from; y <= to; y++) highlighted[y][x] = true;
+            }
+        }
+
+        // Vertical line joining the two children.
+        int top = min(row[nodes[n].left], row[nodes[n].right]);
+        int bottom = max(row[nodes[n].left], row[nodes[n].right]);
+        for (int y = top + 1; y < bottom; y++) {
+            if (grid[y][x] == ' ') grid[y][x] = '|';
+        }
+    }
+
+    // Where a group's own line leaves to the right, show a junction.
+    for (int n = leafCount; n < total; n++) {
+        grid[row[n]][col[n]] = '+';
+    }
+    // Short line coming out of the root.
+    for (int c = col[root] + 1; c < cols; c++) {
+        grid[row[root]][c] = '-';
+        highlighted[row[root]][c] = onPath[root];
+    }
+
+    // Width of the label column.
+    int labelWidth = 0;
+    for (int i = 0; i < leafCount; i++) {
+        labelWidth = max(labelWidth, (int)nodes[i].label.size());
+    }
+
+    // Build the output lines: label + tree.
+    for (int y = 0; y < rows; y++) {
+        string line;
+        int leafHere = -1;
+        for (int i = 0; i < leafCount; i++) {
+            if (row[i] == y) leafHere = i;
+        }
+
+        if (leafHere == -1) {
+            line = string(labelWidth, ' ');
+        } else if (leafHere == highlightLeaf) {
+            line = string(labelWidth - nodes[leafHere].label.size(), ' ') + color(nodes[leafHere].label, PINK);
+        } else {
+            line = padLeft(nodes[leafHere].label, labelWidth);
+        }
+        line += " ";
+
+        for (int x = 0; x < cols; x++) {
+            string ch(1, grid[y][x]);
+            if (grid[y][x] == ' ') line += ch;
+            else if (highlighted[y][x]) line += color(ch, PINK);
+            else line += color(ch, CYAN);
+        }
+        lines.push_back(line);
+    }
+
+    // Distance scale under the tree.
+    string scale(cols, ' ');
+    string low = "0.00";
+    string middle = formatNumber(treeHeight / 2, 2);
+    string high = formatNumber(treeHeight, 2);
+    scale.replace(0, low.size(), low);
+    if (col[root] > 16) scale.replace(col[root] / 2 - 2, middle.size(), middle);
+    scale.replace(max(0, col[root] - 2), high.size(), high);
+    lines.push_back(string(labelWidth + 1, ' ') + color(scale, GREY));
+    lines.push_back(string(labelWidth + 1, ' ') + color("joining distance (smaller = more similar)", GREY));
+    return lines;
 }
