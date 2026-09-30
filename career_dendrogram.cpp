@@ -353,6 +353,20 @@ public:
 };
 
 // ======================================================================
+// Quiz (declarations)
+// ======================================================================
+
+// Quiz.h
+// The career assessment: 28 questions in three parts.
+//   Part 1: 18 interest questions (3 for each RIASEC interest)
+//   Part 2:  6 self-ratings of ability
+//   Part 3:  4 short test questions that check two of those self-ratings
+
+// Runs the assessment on screen.
+// Returns false if the user quits; otherwise fills in the results.
+bool runAssessment(std::vector<double>& traits, double& confidenceGap, int& quizScore, int& quizTotal);
+
+// ======================================================================
 // Utils
 // ======================================================================
 
@@ -1287,4 +1301,209 @@ int AuthManager::attemptsLeft(const string& username) {
 
 int AuthManager::userCount() {
     return users.count();
+}
+
+// ======================================================================
+// Quiz
+// ======================================================================
+
+// Quiz.cpp
+// Asks the 28 assessment questions and turns the answers into 12 trait scores.
+
+// The three kinds of question.
+const int INTEREST = 0;   // answer 1-5: how much would you enjoy it
+const int SKILL = 1;      // answer 1-5: how good are you at it
+const int TEST = 2;       // answer a-d: one correct option
+
+struct Question {
+    int kind;
+    int trait;                  // which of the 12 traits this question measures
+    string text;
+    vector<string> options;     // only for TEST questions
+    int correctOption;          // only for TEST questions (0 = a, 1 = b, ...)
+};
+
+static Question makeQuestion(int kind, int trait, const string& text) {
+    Question q;
+    q.kind = kind;
+    q.trait = trait;
+    q.text = text;
+    q.correctOption = -1;
+    return q;
+}
+
+static Question makeTest(int trait, const string& text, const string& a, const string& b,
+                         const string& c, const string& d, int correct) {
+    Question q = makeQuestion(TEST, trait, text);
+    q.options.push_back(a);
+    q.options.push_back(b);
+    q.options.push_back(c);
+    q.options.push_back(d);
+    q.correctOption = correct;
+    return q;
+}
+
+static vector<Question> buildQuestions() {
+    vector<Question> list;
+
+    // Part 1: interests (trait numbers 0-5)
+    list.push_back(makeQuestion(INTEREST, 0, "Assembling, repairing or building physical things"));
+    list.push_back(makeQuestion(INTEREST, 0, "Working hands-on with machines, tools or hardware"));
+    list.push_back(makeQuestion(INTEREST, 0, "Seeing a tangible, physical result of my work"));
+    list.push_back(makeQuestion(INTEREST, 1, "Figuring out why something works the way it does"));
+    list.push_back(makeQuestion(INTEREST, 1, "Solving hard analytical problems or puzzles"));
+    list.push_back(makeQuestion(INTEREST, 1, "Reading research or technical material out of curiosity"));
+    list.push_back(makeQuestion(INTEREST, 2, "Creating original work: writing, music, visuals or media"));
+    list.push_back(makeQuestion(INTEREST, 2, "Working without a fixed structure or rulebook"));
+    list.push_back(makeQuestion(INTEREST, 2, "Expressing ideas through design or storytelling"));
+    list.push_back(makeQuestion(INTEREST, 3, "Explaining concepts and helping others learn"));
+    list.push_back(makeQuestion(INTEREST, 3, "Working closely with people to solve their problems"));
+    list.push_back(makeQuestion(INTEREST, 3, "Contributing to community or social causes"));
+    list.push_back(makeQuestion(INTEREST, 4, "Leading a team toward an ambitious goal"));
+    list.push_back(makeQuestion(INTEREST, 4, "Persuading, pitching or negotiating with others"));
+    list.push_back(makeQuestion(INTEREST, 4, "Starting new initiatives and taking calculated risks"));
+    list.push_back(makeQuestion(INTEREST, 5, "Organising data, records or schedules precisely"));
+    list.push_back(makeQuestion(INTEREST, 5, "Following well-defined procedures and standards"));
+    list.push_back(makeQuestion(INTEREST, 5, "Checking work carefully for errors and consistency"));
+
+    // Part 2: self-rated skills (trait numbers 6-11)
+    list.push_back(makeQuestion(SKILL, 6, "Quantitative reasoning: algebra, statistics, estimation"));
+    list.push_back(makeQuestion(SKILL, 7, "Programming and computational thinking"));
+    list.push_back(makeQuestion(SKILL, 8, "Written and spoken communication"));
+    list.push_back(makeQuestion(SKILL, 9, "Visual design and spatial thinking"));
+    list.push_back(makeQuestion(SKILL, 10, "Biology, chemistry and the life sciences"));
+    list.push_back(makeQuestion(SKILL, 11, "Business, economics and how markets work"));
+
+    // Part 3: short tests for Quantitative (6) and Computing (7)
+    list.push_back(makeTest(6, "A train covers 120 km in 1.5 hours. At the same speed, how far does it go in 2.25 hours?",
+                            "160 km", "180 km", "190 km", "200 km", 1));
+    list.push_back(makeTest(6, "If 3x + 7 = 25, what is the value of 2x - 1?", "11", "12", "13", "9", 0));
+    list.push_back(makeTest(7, "x = 0; for i = 1 to 4: x = x + i. What is the final value of x?", "6", "10", "4", "15", 1));
+    list.push_back(makeTest(7, "Which data structure serves elements in first-in, first-out order?",
+                            "Stack", "Queue", "Binary tree", "Hash map", 1));
+    return list;
+}
+
+static void showQuestion(const Question& q, int number, int total, int previousAnswer) {
+    string part;
+    if (q.kind == INTEREST) part = "Part 1 of 3: Interests";
+    else if (q.kind == SKILL) part = "Part 2 of 3: Abilities";
+    else part = "Part 3 of 3: Quick check";
+    printTitle("Career Assessment", part);
+
+    double progress = (double)number / total;
+    cout << "  " << color("Question " + toText(number + 1) + " of " + toText(total), GREY) << "   "
+         << colorBar(progress, 40, CYAN) << " " << color(percent(progress), GREY) << "\n\n";
+
+    if (q.kind == INTEREST) cout << color("  How much would you enjoy:", GREY) << "\n";
+    else if (q.kind == SKILL) cout << color("  Rate your current ability in:", GREY) << "\n";
+    else cout << color("  Choose the correct answer:", GREY) << "\n";
+
+    vector<string> lines = wrapText(q.text, SCREEN_WIDTH - 6);
+    for (int i = 0; i < (int)lines.size(); i++) cout << "    " << color(lines[i], BOLD) << "\n";
+    cout << "\n";
+
+    // Print the choices. The previously chosen one (if any) is highlighted.
+    if (q.kind == TEST) {
+        for (int i = 0; i < (int)q.options.size(); i++) {
+            string key = string("[") + (char)('a' + i) + "]";
+            string code = (previousAnswer == i) ? PINK : CYAN;
+            cout << "    " << color(key, code) << " " << q.options[i] << "\n";
+        }
+    } else {
+        string interestWords[5] = {"Strongly dislike", "Dislike", "Neutral", "Enjoy", "Strongly enjoy"};
+        string skillWords[5] = {"Beginner", "Basic", "Competent", "Strong", "Expert"};
+        for (int i = 0; i < 5; i++) {
+            string word = (q.kind == INTEREST) ? interestWords[i] : skillWords[i];
+            string code = (previousAnswer == i + 1) ? PINK : CYAN;
+            cout << "    " << color("[" + toText(i + 1) + "]", code) << " " << word << "\n";
+        }
+    }
+    cout << "\n  " << color("p = previous question    q = quit without saving", GREY) << "\n\n";
+}
+
+// Converts what the user typed into an answer.
+// Returns the answer, or -1 = invalid, -2 = previous, -3 = quit.
+static int readAnswer(const Question& q, string typed) {
+    typed = toLowerText(typed);
+    if (typed == "p") return -2;
+    if (typed == "q") return -3;
+    if (typed.size() != 1) return -1;
+
+    char c = typed[0];
+    if (q.kind == TEST) {
+        if (c >= 'a' && c <= 'd') return c - 'a';
+        if (c >= '1' && c <= '4') return c - '1';
+        return -1;
+    }
+    if (c >= '1' && c <= '5') return c - '0';
+    return -1;
+}
+
+bool runAssessment(vector<double>& traits, double& confidenceGap, int& quizScore, int& quizTotal) {
+    vector<Question> questions = buildQuestions();
+    int total = (int)questions.size();
+    vector<int> answers(total, -1);
+
+    // Ask the questions. The user can move back with 'p'.
+    int current = 0;
+    while (current < total) {
+        showQuestion(questions[current], current, total, answers[current]);
+        int answer = readAnswer(questions[current], askText("Your answer"));
+
+        if (answer == -1) {
+            showError("Please use one of the keys shown in brackets.");
+            waitForEnter();
+        } else if (answer == -2) {
+            if (current > 0) current--;
+        } else if (answer == -3) {
+            if (askYesNo("Quit and discard your answers?")) return false;
+        } else {
+            answers[current] = answer;
+            current++;
+        }
+    }
+
+    // Add up the answers for each trait.
+    double selfSum[TRAIT_COUNT] = {0};
+    int selfCount[TRAIT_COUNT] = {0};
+    double testSum[TRAIT_COUNT] = {0};
+    int testCount[TRAIT_COUNT] = {0};
+    quizScore = 0;
+    quizTotal = 0;
+
+    for (int i = 0; i < total; i++) {
+        Question& q = questions[i];
+        if (q.kind == TEST) {
+            bool correct = (answers[i] == q.correctOption);
+            if (correct) {
+                testSum[q.trait] += 1;
+                quizScore++;
+            }
+            testCount[q.trait]++;
+            quizTotal++;
+        } else {
+            selfSum[q.trait] += (answers[i] - 1) / 4.0;   // turns 1..5 into 0..1
+            selfCount[q.trait]++;
+        }
+    }
+
+    // Final score per trait. For tested traits we average the self-rating
+    // and the test result, and remember how different they were.
+    traits.assign(TRAIT_COUNT, 0.0);
+    double gapTotal = 0;
+    int testedTraits = 0;
+    for (int t = 0; t < TRAIT_COUNT; t++) {
+        double self = selfCount[t] > 0 ? selfSum[t] / selfCount[t] : 0;
+        if (testCount[t] > 0) {
+            double test = testSum[t] / testCount[t];
+            traits[t] = 0.5 * self + 0.5 * test;
+            gapTotal += self - test;
+            testedTraits++;
+        } else {
+            traits[t] = self;
+        }
+    }
+    confidenceGap = testedTraits > 0 ? gapTotal / testedTraits : 0;
+    return true;
 }
