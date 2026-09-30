@@ -134,6 +134,103 @@ T limitValue(T value, T low, T high) {
 std::string sha256(const std::string& text);
 
 // ======================================================================
+// Models (declarations)
+// ======================================================================
+
+// Models.h
+// The main data classes of the program.
+//
+// A student and a career are both described by the same 12 numbers
+// ("traits"), each between 0 and 1:
+//   0-5  : interests  (Realistic, Investigative, Artistic, Social, Enterprising, Conventional)
+//   6-11 : aptitudes  (Quantitative, Computing, Communication, Design, Life Sciences, Business)
+// Because both use the same 12 numbers, we can measure how close they are.
+
+const int TRAIT_COUNT = 12;
+const int INTEREST_COUNT = 6;
+extern const std::string TRAIT_NAMES[TRAIT_COUNT];
+
+// ---------- Maths on trait lists ----------
+double correlation(const std::vector<double>& a, const std::vector<double>& b);  // -1 .. 1
+double traitDistance(const std::vector<double>& a, const std::vector<double>& b);     // Euclidean
+std::string hollandCode(const std::vector<double>& traits);                      // e.g. "ICR"
+std::string traitsToText(const std::vector<double>& traits);                     // "0.62,0.80,..."
+bool textToTraits(const std::string& text, std::vector<double>& traits);
+
+// ---------- Career ----------
+class Career {
+public:
+    std::string id;
+    std::string name;
+    std::string domain;
+    std::vector<double> traits;
+    int salaryMin;     // lakh per annum (INR), indicative
+    int salaryMax;
+    int growth;        // 1 = declining ... 5 = rapid growth
+    std::string exams;
+    std::string summary;
+    std::vector<std::string> milestones;
+
+    Career();
+    bool fromLine(const std::string& line);
+    std::string salaryText() const;
+    std::string growthText() const;
+};
+
+// Holds all careers loaded from careers.csv.
+class CareerList {
+private:
+    std::vector<Career> careers;
+
+public:
+    int load(const std::string& fileName);
+    std::vector<Career>& getAll();
+    Career* findById(const std::string& id);
+    std::vector<Career*> search(const std::string& word);
+    std::vector<std::string> getDomains();
+};
+
+// ---------- Records saved with FileStore<T> ----------
+class User {
+public:
+    std::string username;
+    std::string salt;
+    std::string passwordHash;
+    std::string fullName;
+    std::string createdAt;
+    int failedAttempts;
+    long long lockedUntil;   // time (in seconds) until which login is blocked
+
+    User();
+    std::string getKey() const;
+    std::string toLine() const;
+    bool fromLine(const std::string& line);
+};
+
+class AssessmentResult {
+public:
+    std::string date;
+    std::vector<double> traits;
+    double confidenceGap;   // self-rating minus quiz score (positive = over-confident)
+
+    AssessmentResult();
+    std::string getKey() const;
+    std::string toLine() const;
+    bool fromLine(const std::string& line);
+};
+
+class RoadmapProgress {
+public:
+    std::string careerId;
+    std::string done;   // one character per milestone: '1' = done, '0' = not done
+
+    std::string getKey() const;
+    std::string toLine() const;
+    bool fromLine(const std::string& line);
+    int countDone() const;
+};
+
+// ======================================================================
 // Utils
 // ======================================================================
 
@@ -601,4 +698,308 @@ string sha256(const string& text) {
         result += piece;
     }
     return result;
+}
+
+// ======================================================================
+// Models
+// ======================================================================
+
+// Models.cpp
+// Code for the classes in Models.h.
+
+const string TRAIT_NAMES[TRAIT_COUNT] = {
+    "Realistic",    "Investigative", "Artistic",      "Social", "Enterprising",  "Conventional",
+    "Quantitative", "Computing",     "Communication", "Design", "Life Sciences", "Business"};
+
+// ======================= Maths =======================
+
+// Pearson correlation: +1 means the two lists rise and fall together,
+// 0 means no relation, -1 means opposite patterns.
+double correlation(const vector<double>& a, const vector<double>& b) {
+    double meanA = 0, meanB = 0;
+    for (int i = 0; i < TRAIT_COUNT; i++) {
+        meanA += a[i];
+        meanB += b[i];
+    }
+    meanA /= TRAIT_COUNT;
+    meanB /= TRAIT_COUNT;
+
+    double top = 0, sumA = 0, sumB = 0;
+    for (int i = 0; i < TRAIT_COUNT; i++) {
+        double x = a[i] - meanA;
+        double y = b[i] - meanB;
+        top += x * y;
+        sumA += x * x;
+        sumB += y * y;
+    }
+    if (sumA == 0 || sumB == 0) return 0;
+    return top / (sqrt(sumA) * sqrt(sumB));
+}
+
+// Straight-line (Euclidean) distance between two trait lists.
+double traitDistance(const vector<double>& a, const vector<double>& b) {
+    double sum = 0;
+    for (int i = 0; i < TRAIT_COUNT; i++) {
+        sum += (a[i] - b[i]) * (a[i] - b[i]);
+    }
+    return sqrt(sum);
+}
+
+// First letters of the three strongest interests, e.g. "ICR".
+string hollandCode(const vector<double>& traits) {
+    bool used[INTEREST_COUNT] = {false, false, false, false, false, false};
+    string code;
+    for (int round = 0; round < 3; round++) {
+        int best = -1;
+        for (int i = 0; i < INTEREST_COUNT; i++) {
+            if (!used[i] && (best == -1 || traits[i] > traits[best])) best = i;
+        }
+        used[best] = true;
+        code += TRAIT_NAMES[best][0];
+    }
+    return code;
+}
+
+string traitsToText(const vector<double>& traits) {
+    string text;
+    for (int i = 0; i < TRAIT_COUNT; i++) {
+        if (i > 0) text += ",";
+        text += formatNumber(traits[i], 3);
+    }
+    return text;
+}
+
+bool textToTraits(const string& text, vector<double>& traits) {
+    vector<string> parts = splitText(text, ',');
+    if ((int)parts.size() != TRAIT_COUNT) return false;
+    traits.assign(TRAIT_COUNT, 0.0);
+    for (int i = 0; i < TRAIT_COUNT; i++) traits[i] = toDouble(parts[i]);
+    return true;
+}
+
+// ======================= Career =======================
+
+Career::Career() {
+    salaryMin = 0;
+    salaryMax = 0;
+    growth = 3;
+}
+
+// Line format: id|name|domain|12 traits (0-10)|salary min|salary max|growth|exams|summary|milestones
+bool Career::fromLine(const string& line) {
+    vector<string> field = splitText(line, '|');
+    if (field.size() != 10) return false;
+
+    id = trimText(field[0]);
+    name = trimText(field[1]);
+    domain = trimText(field[2]);
+    exams = trimText(field[7]);
+    summary = trimText(field[8]);
+
+    vector<string> numbers = splitText(field[3], ',');
+    if ((int)numbers.size() != TRAIT_COUNT || id.empty()) return false;
+    traits.assign(TRAIT_COUNT, 0.0);
+    for (int i = 0; i < TRAIT_COUNT; i++) traits[i] = toDouble(numbers[i]) / 10.0;
+    salaryMin = toInt(field[4]);
+    salaryMax = toInt(field[5]);
+    growth = toInt(field[6]);
+
+    milestones.clear();
+    vector<string> steps = splitText(field[9], ';');
+    for (int i = 0; i < (int)steps.size(); i++) {
+        if (!trimText(steps[i]).empty()) milestones.push_back(trimText(steps[i]));
+    }
+    return true;
+}
+
+string Career::salaryText() const {
+    if (salaryMin == 0) return "Highly variable";
+    return "INR " + toText(salaryMin) + " - " + toText(salaryMax) + " LPA";
+}
+
+string Career::growthText() const {
+    string names[5] = {"Declining", "Slow", "Stable", "Growing", "Rapid growth"};
+    return names[limitValue(growth, 1, 5) - 1];
+}
+
+// ======================= CareerList =======================
+
+// Built-in careers. Written to data/careers.csv the first time the program
+// runs, so you can edit or add careers later without recompiling.
+// Trait order: REA INV ART SOC ENT CON | QNT CMP COM DSN BIO BUS (each 0-10)
+static const char* DEFAULT_CAREERS =
+    "# Career list - id|name|domain|traits(12, 0-10)|salary min LPA|salary max LPA|growth 1-5|entry exams|summary|milestones (;)\n"
+    "swe|Software Engineer|Technology|4,8,4,3,4,6,7,10,5,4,1,3|6|40|5|JEE Main / Advanced, GATE CS|Designs, builds and maintains software systems at scale.|Master one language and core data structures;Build three end-to-end projects;Contribute to an open-source project;Complete a software internship;Prepare for system design interviews\n"
+    "ds|Data Scientist|Technology|2,10,3,3,4,6,10,8,6,3,2,5|8|35|5|JEE, GATE DA, IIT Madras BS in Data Science|Extracts insight and predictive models from data.|Build a statistics and probability foundation;Learn Python, SQL and pandas;Complete machine learning coursework;Publish a portfolio on real datasets;Complete an analytics internship\n"
+    "mle|Machine Learning Engineer|Technology|3,10,3,2,4,5,10,10,4,3,1,3|10|50|5|JEE Advanced, GATE CS / DA|Builds, trains and deploys machine learning models in production.|Linear algebra and optimisation;Learn a deep learning framework;Reimplement two research papers;Learn MLOps and model deployment;Complete a research or industry internship\n"
+    "cyber|Cybersecurity Analyst|Technology|5,8,2,3,3,8,6,9,5,2,1,3|6|30|5|GATE CS, CEH / OSCP certification|Protects systems and networks against attack.|Networking and operating systems fundamentals;Linux and scripting;Compete in capture-the-flag events;Earn a security certification;Complete a SOC or red-team internship\n"
+    "cloud|Cloud / DevOps Engineer|Technology|5,7,2,3,3,8,5,9,4,2,1,3|6|35|5|AWS / Azure / GCP certifications|Automates infrastructure and keeps systems reliable.|Linux and networking;Docker and Kubernetes;Infrastructure as code;Earn a cloud certification;Complete an SRE internship\n"
+    "gamedev|Game Developer|Technology|4,7,9,3,4,4,7,9,4,9,1,2|5|30|4|JEE Main, NID, portfolio-based hiring|Designs and programs interactive games.|C++ or C# fundamentals;Learn Unity or Unreal;Ship a small complete game;Take part in game jams;Complete a studio internship\n"
+    "uxd|UX / Product Designer|Design|2,5,9,6,4,3,3,5,7,10,1,4|5|30|5|UCEED, CEED, NID DAT|Designs digital products around real user needs.|Design fundamentals and typography;Prototyping in Figma;User research methods;Build a case-study portfolio;Complete a design internship\n"
+    "architect|Architect|Design|6,5,9,3,4,5,5,4,6,10,1,4|4|25|3|NATA, JEE Main Paper 2|Designs buildings and public spaces.|Sketching and visual composition;Complete B.Arch;AutoCAD and Revit;Practical training;Council of Architecture registration\n"
+    "animator|Animator / VFX Artist|Media|3,3,10,2,3,3,2,5,4,10,1,2|3|18|4|NID, portfolio|Creates animation, motion graphics and visual effects.|Drawing and composition;Blender or Maya;Build a showreel;Complete a studio internship;Specialise in 3D or compositing\n"
+    "journalist|Journalist / Content Strategist|Media|1,6,8,7,6,3,3,2,10,5,1,4|3|20|3|IIMC entrance, CUET|Investigates and communicates stories to the public.|Write every day;Build a published portfolio;Complete a media internship;Learn data journalism basics;Specialise in a beat\n"
+    "civil|Civil Engineer|Engineering|9,6,3,3,4,7,7,3,4,6,1,3|4|15|3|JEE Main, GATE CE, ESE|Plans and builds infrastructure such as roads, bridges and water systems.|Mechanics and structural analysis;AutoCAD and STAAD.Pro;Complete a site internship;Prepare for GATE or ESE;Obtain professional licensure\n"
+    "mech|Mechanical Engineer|Engineering|9,7,3,2,4,6,8,4,4,7,1,3|4|18|3|JEE Main / Advanced, GATE ME|Designs machines, engines and manufacturing systems.|Thermodynamics and mechanics;CAD with SolidWorks;Build a hardware project;Complete industrial training;Specialise in EV, robotics or HVAC\n"
+    "ece|Electronics / VLSI Engineer|Engineering|7,9,2,2,3,6,9,7,3,5,1,2|7|35|4|JEE Advanced, GATE EC|Designs circuits, chips and embedded systems.|Circuit theory and digital logic;Verilog or VHDL;Embedded C and microcontrollers;Complete an FPGA project;Complete a semiconductor internship\n"
+    "robotics|Robotics Engineer|Engineering|9,9,4,2,4,5,9,8,3,7,1,2|8|35|5|JEE Advanced, GATE ME / EC|Builds autonomous machines combining mechanics, electronics and software.|Control systems;ROS and C++;Build a working robot;Computer vision basics;Join a research lab or robotics startup\n"
+    "aero|Aerospace Engineer|Engineering|8,10,3,2,3,6,10,7,4,7,1,2|7|30|4|JEE Advanced, GATE AE, ISRO recruitment|Designs aircraft, spacecraft and propulsion systems.|Fluid mechanics and aerodynamics;MATLAB and CFD;Rocketry or SAE team project;ISRO or DRDO internship;M.Tech or MS\n"
+    "doctor|Medical Doctor|Healthcare|5,9,2,9,3,6,6,2,7,3,10,2|10|60|4|NEET UG, NEET PG|Diagnoses and treats patients.|Prepare for NEET UG;Complete MBBS;Complete the internship year;Clear NEET PG;Residency and specialisation\n"
+    "pharma|Pharmacist / Pharma R&D|Healthcare|4,8,2,5,3,8,6,3,5,2,9,3|4|15|3|NEET / state CETs, GPAT|Develops, tests and dispenses medicines.|Pharmaceutical chemistry;Complete B.Pharm;Clear GPAT;Hospital or industry internship;Specialise in regulatory affairs or R&D\n"
+    "psych|Clinical Psychologist|Healthcare|2,7,4,10,3,4,4,1,9,2,7,2|4|20|4|CUET, RCI-recognised M.Phil|Assesses and treats mental and behavioural health.|Psychology undergraduate degree;Research methods and statistics;Supervised practicum;RCI-recognised M.Phil;Licensure\n"
+    "biotech|Biotechnologist|Science|5,10,2,3,3,6,7,5,4,2,10,2|5|20|4|JEE / NEET, IISER Aptitude Test, GATE BT|Engineers biological systems for medicine, agriculture and industry.|Molecular biology and genetics;Core laboratory techniques;Bioinformatics with Python;Complete a research project;MS or PhD\n"
+    "research|Research Scientist|Science|3,10,4,3,3,5,9,7,6,3,5,1|8|30|4|IIT JAM, GATE, JEST, GRE|Pushes the frontier of knowledge through experiments and theory.|Strong core in mathematics and science;Summer research fellowship;Publish a paper;Clear JAM or GRE;PhD\n"
+    "env|Environmental Scientist|Science|8,8,3,6,3,5,6,4,5,3,8,2|4|15|4|IIT JAM, GATE ES, IFoS (UPSC)|Studies ecosystems and designs solutions to environmental problems.|Ecology and earth science;GIS and remote sensing;Field research;Data analysis in R or Python;Policy or research role\n"
+    "educator|Educator / Academic|Education|2,7,4,10,4,5,5,3,10,3,3,2|4|20|3|UGC NET, CSIR NET, B.Ed, PhD|Teaches and mentors, often combined with research.|Deep subject mastery;Teaching assistant role;Clear UGC or CSIR NET;Publish research;Secure a faculty position\n"
+    "ca|Chartered Accountant|Finance|2,6,1,4,5,10,9,3,6,1,1,9|7|30|4|CA Foundation, Intermediate, Final (ICAI)|Audits accounts, advises on tax and manages financial reporting.|Clear CA Foundation;Clear CA Intermediate;Complete articleship;Clear CA Final;Specialise in audit, tax or advisory\n"
+    "ib|Investment Banker|Finance|1,7,2,5,10,7,9,4,8,2,1,10|15|60|4|CAT, CFA, MBA|Advises on mergers, acquisitions and capital raising.|Accounting and corporate finance;Financial modelling in Excel;CFA Level 1;Front-office internship;MBA or analyst programme\n"
+    "quant|Quantitative Analyst|Finance|1,10,2,2,5,7,10,9,4,2,1,7|20|80|5|JEE Advanced, mathematics olympiads|Builds mathematical models for trading and risk.|Probability and stochastic calculus;C++ and Python;Build an algorithmic trading project;Puzzle and probability interview preparation;Quant internship\n"
+    "analyst|Business Analyst|Business|1,7,2,5,6,8,8,6,8,3,1,8|6|20|4|CAT, IIT Madras BS in Data Science, BI certifications|Translates data into business decisions.|Excel and SQL;Power BI or Tableau;Applied statistics;Case-study portfolio;Analyst internship\n"
+    "pm|Product Manager|Business|2,6,4,6,9,4,6,6,9,6,1,8|12|45|5|CAT, engineering background preferred|Owns product strategy across users, engineering and business.|Understand software delivery;Analytics and product metrics;Write product specifications;Ship a side product;APM programme or internship\n"
+    "consult|Management Consultant|Business|2,7,3,6,9,6,8,4,9,4,1,9|12|40|4|CAT / GMAT|Solves strategic problems for organisations.|Structured problem solving;Case interview practice;Excel and presentation skills;Hold a leadership position;MBA or business analyst role\n"
+    "marketing|Marketing Manager|Business|1,5,7,7,9,4,5,3,9,7,1,8|6|30|4|CAT, MICAT|Shapes how products reach and persuade customers.|Consumer psychology;Digital marketing and analytics;Run a real campaign;Brand management internship;MBA in Marketing\n"
+    "hr|Human Resources Manager|Business|1,4,3,9,7,7,3,2,9,2,1,7|5|20|3|CAT, XAT|Hires, develops and supports people in organisations.|Organisational behaviour;Communication and negotiation;HR analytics;HR internship;MBA in Human Resources\n"
+    "founder|Entrepreneur / Founder|Business|4,6,6,5,10,3,6,6,8,6,2,10|0|0|4|No fixed exam; incubators and accelerators|Builds new ventures from idea to scale.|Identify a real problem worth solving;Build a minimum viable product;Acquire the first ten users;Join an incubator or accelerator;Raise funding or reach profitability\n"
+    "lawyer|Lawyer|Law|1,7,4,6,8,7,4,1,10,1,1,5|5|40|3|CLAT, AILET|Represents clients and interprets the law.|Prepare for CLAT;Complete a five-year LL.B;Moot court competitions;Law-firm internships;Bar Council enrolment\n"
+    "civilservice|Civil Services Officer|Public Service|3,7,2,8,8,7,5,2,9,2,2,5|8|25|3|UPSC CSE, State PSC|Administers public policy at district, state and national level.|NCERT foundation;Daily current-affairs habit;Choose an optional subject;Answer-writing practice;UPSC Prelims, Mains and Interview\n";
+
+int CareerList::load(const string& fileName) {
+    // Create the file from the built-in list if it does not exist yet.
+    if (!fileExists(fileName)) {
+        makeFolderFor(fileName);
+        ofstream output(fileName.c_str());
+        output << DEFAULT_CAREERS;
+    }
+
+    careers.clear();
+    ifstream input(fileName.c_str());
+    string line;
+    while (getline(input, line)) {
+        if (!line.empty() && line[line.size() - 1] == '\r') line.erase(line.size() - 1);
+        if (line.empty() || line[0] == '#') continue;
+        Career career;
+        if (career.fromLine(line) && findById(career.id) == NULL) {
+            careers.push_back(career);
+        }
+    }
+    return (int)careers.size();
+}
+
+vector<Career>& CareerList::getAll() {
+    return careers;
+}
+
+Career* CareerList::findById(const string& id) {
+    for (int i = 0; i < (int)careers.size(); i++) {
+        if (careers[i].id == id) return &careers[i];
+    }
+    return NULL;
+}
+
+// Finds careers whose name, domain, summary or exams contain the word.
+vector<Career*> CareerList::search(const string& word) {
+    string target = toLowerText(trimText(word));
+    vector<Career*> results;
+    for (int i = 0; i < (int)careers.size(); i++) {
+        Career& c = careers[i];
+        string allText = toLowerText(c.name + " " + c.domain + " " + c.summary + " " + c.exams);
+        if (target.empty() || allText.find(target) != string::npos) {
+            results.push_back(&c);
+        }
+    }
+    return results;
+}
+
+vector<string> CareerList::getDomains() {
+    vector<string> domains;
+    for (int i = 0; i < (int)careers.size(); i++) {
+        bool alreadyAdded = false;
+        for (int j = 0; j < (int)domains.size(); j++) {
+            if (domains[j] == careers[i].domain) alreadyAdded = true;
+        }
+        if (!alreadyAdded) domains.push_back(careers[i].domain);
+    }
+    return domains;
+}
+
+// ======================= User =======================
+
+User::User() {
+    failedAttempts = 0;
+    lockedUntil = 0;
+}
+
+string User::getKey() const {
+    return username;
+}
+
+string User::toLine() const {
+    return username + "|" + salt + "|" + passwordHash + "|" + fullName + "|" + createdAt + "|" +
+           toText(failedAttempts) + "|" + toText(lockedUntil);
+}
+
+bool User::fromLine(const string& line) {
+    vector<string> field = splitText(line, '|');
+    if (field.size() != 7) return false;
+    username = field[0];
+    salt = field[1];
+    passwordHash = field[2];
+    fullName = field[3];
+    createdAt = field[4];
+    failedAttempts = toInt(field[5]);
+    lockedUntil = toLongLong(field[6]);
+    return !username.empty() && passwordHash.size() == 64;
+}
+
+// ======================= AssessmentResult =======================
+
+AssessmentResult::AssessmentResult() {
+    traits.assign(TRAIT_COUNT, 0.0);
+    confidenceGap = 0;
+}
+
+string AssessmentResult::getKey() const {
+    return date;
+}
+
+string AssessmentResult::toLine() const {
+    return date + "|" + traitsToText(traits) + "|" + formatNumber(confidenceGap, 3);
+}
+
+bool AssessmentResult::fromLine(const string& line) {
+    vector<string> field = splitText(line, '|');
+    if (field.size() != 3) return false;
+    date = field[0];
+    if (!textToTraits(field[1], traits)) return false;
+    confidenceGap = toDouble(field[2]);
+    return true;
+}
+
+// ======================= RoadmapProgress =======================
+
+string RoadmapProgress::getKey() const {
+    return careerId;
+}
+
+string RoadmapProgress::toLine() const {
+    return careerId + "|" + done;
+}
+
+bool RoadmapProgress::fromLine(const string& line) {
+    vector<string> field = splitText(line, '|');
+    if (field.size() != 2 || field[0].empty()) return false;
+    careerId = field[0];
+    done = field[1];
+    for (int i = 0; i < (int)done.size(); i++) {
+        if (done[i] != '0' && done[i] != '1') return false;
+    }
+    return true;
+}
+
+int RoadmapProgress::countDone() const {
+    int total = 0;
+    for (int i = 0; i < (int)done.size(); i++) {
+        if (done[i] == '1') total++;
+    }
+    return total;
 }
