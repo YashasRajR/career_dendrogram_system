@@ -231,6 +231,89 @@ public:
 };
 
 // ======================================================================
+// FileStore (declarations)
+// ======================================================================
+
+// FileStore.h
+// A class template that saves a list of records to a text file and loads
+// them back. One template works for users, assessments and roadmaps.
+//
+// The record type T must have these three member functions:
+//     std::string getKey() const;               // a unique id, e.g. username
+//     std::string toLine() const;               // record -> one line of text
+//     bool fromLine(const std::string& line);   // one line of text -> record
+
+template <typename T>
+class FileStore {
+private:
+    std::string fileName;
+    std::string description;   // written as a comment on the first line
+    std::vector<T> items;
+
+public:
+    FileStore(const std::string& file, const std::string& about) {
+        fileName = file;
+        description = about;
+    }
+
+    // Reads every line of the file. Bad lines are skipped.
+    void load() {
+        items.clear();
+        std::ifstream input(fileName.c_str());
+        std::string line;
+        while (std::getline(input, line)) {
+            if (!line.empty() && line[line.size() - 1] == '\r') line.erase(line.size() - 1);
+            if (line.empty() || line[0] == '#') continue;
+            T item;
+            if (item.fromLine(line)) items.push_back(item);
+        }
+    }
+
+    // Writes every record to the file. Returns false if the file cannot be written.
+    bool save() const {
+        makeFolderFor(fileName);
+        std::ofstream output(fileName.c_str());
+        if (!output) return false;
+        output << "# " << description << "\n";
+        for (int i = 0; i < (int)items.size(); i++) {
+            output << items[i].toLine() << "\n";
+        }
+        return true;
+    }
+
+    // Returns a pointer to the record with this key, or NULL if not found.
+    T* find(const std::string& key) {
+        for (int i = 0; i < (int)items.size(); i++) {
+            if (items[i].getKey() == key) return &items[i];
+        }
+        return NULL;
+    }
+
+    // Replaces the record with the same key, or adds it at the end.
+    void addOrUpdate(const T& item) {
+        T* existing = find(item.getKey());
+        if (existing != NULL) {
+            *existing = item;
+        } else {
+            items.push_back(item);
+        }
+    }
+
+    bool remove(const std::string& key) {
+        for (int i = 0; i < (int)items.size(); i++) {
+            if (items[i].getKey() == key) {
+                items.erase(items.begin() + i);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    std::vector<T>& getAll() { return items; }
+    int count() const { return (int)items.size(); }
+};
+
+// ======================================================================
 // Utils
 // ======================================================================
 
