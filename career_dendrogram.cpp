@@ -314,6 +314,45 @@ public:
 };
 
 // ======================================================================
+// Auth (declarations)
+// ======================================================================
+
+// Auth.h
+// Handles user accounts: register, log in, change password.
+// Passwords are stored only as salted SHA-256 hashes.
+
+const int MAX_LOGIN_ATTEMPTS = 3;    // wrong passwords allowed before locking
+const int LOCK_SECONDS = 60;         // how long the account stays locked
+const int HASH_ROUNDS = 5000;        // repeat hashing to slow down guessing
+
+class AuthManager {
+private:
+    FileStore<User> users;
+
+    std::string makeSalt();
+    std::string hashPassword(const std::string& salt, const std::string& password);
+
+public:
+    AuthManager(const std::string& fileName);
+
+    // These return "" on success, or an error message.
+    std::string registerUser(const std::string& username, const std::string& fullName, const std::string& password);
+    std::string changePassword(const std::string& username, const std::string& oldPassword, const std::string& newPassword);
+
+    // Returns true and fills 'user' if the login is correct.
+    // Otherwise returns false and puts the reason in 'message'.
+    bool login(const std::string& username, const std::string& password, User& user, std::string& message);
+
+    int secondsLocked(const std::string& username);
+    int attemptsLeft(const std::string& username);
+    int userCount();
+
+    static bool isValidUsername(const std::string& username);
+    static int passwordStrength(const std::string& password);   // 0 (very weak) to 4 (strong)
+    static std::string strengthName(int strength);
+};
+
+// ======================================================================
 // Utils
 // ======================================================================
 
@@ -1085,4 +1124,167 @@ int RoadmapProgress::countDone() const {
         if (done[i] == '1') total++;
     }
     return total;
+}
+
+// ======================================================================
+// Auth
+// ======================================================================
+
+// Auth.cpp
+// Code for the AuthManager class.
+
+AuthManager::AuthManager(const string& fileName)
+    : users(fileName, "users - username|salt|password hash|full name|created|failed attempts|locked until") {
+    users.load();
+}
+
+// Username rules: 3-20 characters, starts with a letter,
+// only lowercase letters, digits and underscore.
+bool AuthManager::isValidUsername(const string& username) {
+    if (username.size() < 3 || username.size() > 20) return false;
+    if (!islower((unsigned char)username[0])) return false;
+    for (int i = 0; i < (int)username.size(); i++) {
+        char c = username[i];
+        bool ok = islower((unsigned char)c) || isdigit((unsigned char)c) || c == '_';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+// Gives a score from 0 to 4 based on length and the kinds of characters used.
+int AuthManager::passwordStrength(const string& password) {
+    bool hasLower = false, hasUpper = false, hasDigit = false, hasSymbol = false;
+    for (int i = 0; i < (int)password.size(); i++) {
+        char c = password[i];
+        if (islower((unsigned char)c)) hasLower = true;
+        else if (isupper((unsigned char)c)) hasUpper = true;
+        else if (isdigit((unsigned char)c)) hasDigit = true;
+        else hasSymbol = true;
+    }
+    int kinds = hasLower + hasUpper + hasDigit + hasSymbol;
+
+    int score = 0;
+    if (password.size() >= 8) score++;
+    if (password.size() >= 12) score++;
+    if (kinds >= 2) score++;
+    if (kinds >= 3) score++;
+    if (password.size() < 8 && score > 1) score = 1;   // short passwords are always weak
+    return score;
+}
+
+string AuthManager::strengthName(int strength) {
+    string names[5] = {"Very weak", "Weak", "Fair", "Good", "Strong"};
+    return names[limitValue(strength, 0, 4)];
+}
+
+// A salt is random text added to the password before hashing, so two users
+// with the same password still get different hashes.
+string AuthManager::makeSalt() {
+    static bool seeded = false;
+    if (!seeded) {
+        srand((unsigned int)time(0));   // start the random numbers from the current time
+        seeded = true;
+    }
+    string letters = "0123456789abcdef";
+    string salt;
+    for (int i = 0; i < 16; i++) {
+        salt += letters[rand() % 16];
+    }
+    return salt;
+}
+
+string AuthManager::hashPassword(const string& salt, const string& password) {
+    string hash = sha256(salt + ":" + password);
+    for (int i = 0; i < HASH_ROUNDS; i++) {
+        hash = sha256(hash + salt);
+    }
+    return hash;
+}
+
+string AuthManager::registerUser(const string& username, const string& fullName, const string& password) {
+    if (!isValidUsername(username)) {
+        return "Username must be 3-20 characters: lowercase letters, digits or underscore, starting with a letter.";
+    }
+    if (users.find(username) != NULL) {
+        return "That username is already taken.";
+    }
+    if (password.size() < 8 || passwordStrength(password) < 2) {
+        return "Password must be at least 8 characters and mix two kinds of characters (e.g. letters and digits).";
+    }
+
+    User user;
+    user.username = username;
+    user.fullName = fullName.empty() ? username : fullName;
+    user.salt = makeSalt();
+    user.passwordHash = hashPassword(user.salt, password);
+    user.createdAt = currentTime();
+
+    users.addOrUpdate(user);
+    if (!users.save()) return "Could not save the user file.";
+    return "";
+}
+
+bool AuthManager::login(const string& username, const string& password, User& user, string& message) {
+    User* found = users.find(username);
+    if (found == NULL) {
+        message = "Invalid username or password.";
+        return false;
+    }
+
+    if (found->lockedUntil > currentSeconds()) {
+        message = "Account locked. Try again in " + toText(secondsLocked(username)) + " seconds.";
+        return false;
+    }
+
+    if (hashPassword(found->salt, password) != found->passwordHash) {
+        found->failedAttempts++;
+        if (found->failedAttempts >= MAX_LOGIN_ATTEMPTS) {
+            found->failedAttempts = 0;
+            found->lockedUntil = currentSeconds() + LOCK_SECONDS;
+            message = "Too many wrong attempts. Account locked for " + toText(LOCK_SECONDS) + " seconds.";
+        } else {
+            message = "Invalid username or password. " + toText(attemptsLeft(username)) + " attempt(s) left.";
+        }
+        users.save();
+        return false;
+    }
+
+    // Correct password: reset the counters.
+    found->failedAttempts = 0;
+    found->lockedUntil = 0;
+    users.save();
+    user = *found;
+    return true;
+}
+
+string AuthManager::changePassword(const string& username, const string& oldPassword, const string& newPassword) {
+    User user;
+    string message;
+    if (!login(username, oldPassword, user, message)) return message;
+    if (newPassword.size() < 8 || passwordStrength(newPassword) < 2) {
+        return "New password is too weak.";
+    }
+
+    User* stored = users.find(username);
+    stored->salt = makeSalt();
+    stored->passwordHash = hashPassword(stored->salt, newPassword);
+    if (!users.save()) return "Could not save the user file.";
+    return "";
+}
+
+int AuthManager::secondsLocked(const string& username) {
+    User* user = users.find(username);
+    if (user == NULL) return 0;
+    long long left = user->lockedUntil - currentSeconds();
+    return left > 0 ? (int)left : 0;
+}
+
+int AuthManager::attemptsLeft(const string& username) {
+    User* user = users.find(username);
+    if (user == NULL) return MAX_LOGIN_ATTEMPTS;
+    return MAX_LOGIN_ATTEMPTS - user->failedAttempts;
+}
+
+int AuthManager::userCount() {
+    return users.count();
 }
