@@ -1,3 +1,9 @@
+<!-- profile-card:start -->
+<p align="center">
+  <a href="https://github.com/YashasRajR"><img src="https://raw.githubusercontent.com/YashasRajR/YashasRajR/main/cards/headers/career_dendrogram_system.svg" width="100%" alt="Career Dendrogram" /></a>
+</p>
+<!-- profile-card:end -->
+
 # Career Dendrogram System
 
 A console-based career guidance system in simple C++. It profiles a student across 12 interest and aptitude dimensions, ranks 33 careers with an explainable similarity model, and uses **hierarchical agglomerative clustering** to draw a dendrogram that shows where the student sits among career families. That is the idea behind the name.
